@@ -1,0 +1,35 @@
+# checkpoints #
+*.ipynb_checkpoints
+*.Ipynb Checkpoints
+
+# macOS files
+._*
+*.DS_Store
+
+# Compiled source #
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Packages #
+############
+# it's better to unpack these files and commit the raw source
+# git has its own built in compression methods
+*.7z
+*.dmg
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+*.gz
+
+# Other #
+*.csv
+*.pyc
+*.bak
+*.conf
+__pycache__
