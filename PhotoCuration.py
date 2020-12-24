@@ -1,3 +1,6 @@
+__version__ = '0.5'
+
+
 import sys
 # sys.path.insert(0,"..") # Adds higher directory to python modules path.
 
@@ -820,7 +823,8 @@ class PhotoCuration(object):
                         region[parts[0]]={}
                     region[parts[0]][parts[1]]=f[faceKeyMap[k]]
                 else:
-                    region[k]=f[faceKeyMap[k]]
+                    if f[faceKeyMap[k]] is not pd.NA:
+                        region[k]=f[faceKeyMap[k]]
 
             # face_size in pixels = face_size × √(width²+height²)
             region['Area']['facesize_pix']=f['face_size']
@@ -2391,9 +2395,16 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             'location_suggested_name'
         ]
 
+        before=pd.get_option("max_rows")
+        pd.set_option("max_rows", None)
+
         # Assets with low caption score
         badNames=self.assets[(self.assets['infered_asset_caption_score']<0.5) & (self.assets['trashed']==0)][cols]
+
         display(badNames)
+
+
+
 
         totalNames=self.assets[(self.assets['trashed']==0)][[
             'dcim_folder',
@@ -2404,6 +2415,10 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         ]]
 
         display(totalNames)
+
+
+
+        pd.set_option("max_rows", before)
 
 
 
