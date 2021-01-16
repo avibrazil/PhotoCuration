@@ -1,8 +1,8 @@
 __version__ = '0.5'
 
 
-import sys
-# sys.path.insert(0,"..") # Adds higher directory to python modules path.
+# import sys
+# sys.path.insert(0,"../..") # Adds higher directory to python modules path.
 
 #### TODO
 # - Write photo XMP tags
@@ -38,6 +38,11 @@ import mutagen
 import re
 import json
 import subprocess
+import libxmp.utils
+import libxmp
+import bs4
+
+
 
 
 
@@ -72,7 +77,7 @@ filenaneTemplate="""{#- -#}
 {% if camera_model or app_creator %}{{ (camera_model or app_creator)|secure }}{% endif -%}
 {% if unedited %} original{% endif %}{% if variation %} {{variation}}{% endif %}】{% endif -%}
 {% if collision_index>0 %}~〔{{ "{:02d}".format(collision_index) }}〕{% endif -%}
-.{{original_file_extension -}}
+.{{ ext -}}
 """
 
 class PhotoCuration(object):
@@ -521,8 +526,35 @@ class PhotoCuration(object):
 
     def __init__(self,
                 configFile=None,
+                backupRoot=None,
+                udid=None,
+                backupPassword=None,
+                backupDerivedKey=None
+        ):
+
+        self.logger=logging.getLogger('{a}.{b}'.format(a=__name__, b=type(self).__name__))
+
+        self.j2=jinja2.Environment()
+        self.j2.filters['secure']=PhotoCuration.secureFileName
+
+        self.iosDBs={}
+        self.loadConfig(configFile)
+        self.logger.debug(dict(self.config))
+
+#         backuproot=None
+#         if 'global' in self.config and 'backup' in self.config['global']:
+#             backuproot=self.config['global']['backup']
+
+        self.ios=iOSbackup(udid=udid, derivedkey=backupDerivedKey, backuproot=backupRoot)
+        self.getiOSfiles()
+        self.getPhotoDB()
+        self.curated=False
+        self.tagger=Tagger()
+
+
+    def curatedArchiving(self,
                 author=None, # author of photos
-                device_owner=None,
+                deviceOwner=None,
                 start=None,
                 end=None,
                 extractTypes=None,
@@ -530,10 +562,7 @@ class PhotoCuration(object):
                 originals=['1>101', '0>2>3>0', '0>2>3>3', '0>2>5>1', '0>2>5>2'], # either to extract also originals or not
                 trashed=False,
                 filenameTemplate=filenaneTemplate
-        ):
-
-        self.logger=logging.getLogger('{a}.{b}'.format(a=__name__, b=type(self).__name__))
-
+    ):
         if start:
             self.start=pd.Timestamp(start).to_pydatetime()
         else:
@@ -545,7 +574,7 @@ class PhotoCuration(object):
             self.end=end
 
         self.author=author
-        self.device_owner=device_owner
+        self.device_owner=deviceOwner
         self.target=target
         self.trashed=trashed
         self.extractTypes=extractTypes
@@ -553,30 +582,41 @@ class PhotoCuration(object):
         # Handling of originals
         self.originals=originals
 
-        j2=jinja2.Environment()
-        j2.filters['secure']=PhotoCuration.secureFileName
-        self.filenameTemplate=j2.from_string(filenameTemplate)
+        self.filenameTemplate=self.j2.from_string(filenameTemplate)
 
-        self.iosDBs={}
-        self.loadConfig(configFile)
-        logging.debug(dict(self.config))
+        if self.curated == False:
+            self.fetchAssets()
+            self.fetchAlbums()
+            self.fetchMemories()
+            self.fetchPeople()
+            self.calcAssetsKeywords()
+            self.fetchPlacesMoments()
+            self.addAssetNameFromSmallestAlbum()
+            self.addAssetNameFromSmallestMemory()
+            self.calcBestLocationName()
+            self.calcBestAssetCaption()
 
-        backuproot=None
-        if 'global' in self.config and 'backup' in self.config['global']:
-            backuproot=self.config['global']['backup']
+            self.curated=True
 
-        self.ios=iOSbackup(udid=self.config['device']['UDID'], derivedkey=self.config['device']['decryptionkey'], backuproot=backuproot)
-        self.getiOSfiles()
-        self.getPhotoDB()
+        self.extractAndTag()
 
 
 
 
     def __del__(self):
+        self.close()
+
+
+
+    def close(self):
         self.db.close()
-        del self.ios
+        self.ios.close()
         for f in self.iosDBs:
-            os.remove(self.iosDBs[f]['decryptedFilePath'])
+            try:
+                os.remove(self.iosDBs[f]['decryptedFilePath'])
+            except FileNotFoundError:
+                # Its OK if Photos database temporary file is not there anymore
+                pass
 
 
     def secureFileName(string):
@@ -734,8 +774,6 @@ class PhotoCuration(object):
                 }
             }
 
-            self.logger.warning("Working on {}".format(assetCurrent['incarnations']['master']['tags']['original_file']))
-
             # Merge timezone offset into creation_local_object
             assetCurrent['incarnations']['master']['tags']['creation_local_object']=(
                 assetCurrent['incarnations']['master']['tags']['creation_local_object']
@@ -749,6 +787,14 @@ class PhotoCuration(object):
             assetCurrent['incarnations']['master']['tags']['collision_index'] = 0
             assetCurrent['incarnations']['master']['tags']['original_file_no_extension']=os.path.splitext(assetCurrent['incarnations']['master']['tags']['original_file'])[0]
             assetCurrent['incarnations']['master']['tags']['original_file_extension']=os.path.splitext(assetCurrent['incarnations']['master']['tags']['original_file'])[1][1:].strip().lower()
+
+
+            self.logger.warning("Working on {} [{}] “{}”".format(
+                assetCurrent['incarnations']['master']['tags']['original_file'],
+                assetCurrent['incarnations']['master']['tags']['creation_local_object'].isoformat(),
+                assetCurrent['incarnations']['master']['tags']['suggested_caption']
+            ))
+
 
             self.assetCurrent=assetCurrent
 
@@ -765,10 +811,16 @@ class PhotoCuration(object):
                 self.handleVideo(assetCurrent)
 
             if assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>2'):
+                # Its a Live photo...
+
+
                 # Handle Live photos, the image part
                 self.handleImage(assetCurrent)
 
 #                 if assetCurrent['incarnations']['master']['tags']['kind_encoded'] != '0>2>3>3':
+
+
+
                 # Now morph it into a video to handle the video part
                 self.logger.debug(f"Handling video part of Live Photo {assetCurrent['incarnations']['master']['tags']['original_file']}")
 
@@ -776,6 +828,7 @@ class PhotoCuration(object):
                 deletes=set(assetCurrent['incarnations'].keys())
                 deletes.remove('master')
                 for i in deletes:
+                    # Delete all incarnations except 'master'
                     del assetCurrent['incarnations'][i]
 
                 assetCurrent['incarnations']['master']['tags']['original_file']=assetCurrent['incarnations']['master']['tags']['original_file_no_extension']+'.MOV'
@@ -866,6 +919,8 @@ class PhotoCuration(object):
 
         self.logger.debug(f"ffprobe {currentIncarnation['decryptedFileInfo']['decryptedFilePath']}")
         currentIncarnation['meta']=ffmpeg.probe(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
+        currentIncarnation['xmp']=self.tagger.getXMP(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
+
 
         metaToTags=[
             # exifread bindings
@@ -876,17 +931,19 @@ class PhotoCuration(object):
         ]
 
         # Get video number of frames per second; useful to handle slow motion videos
-        try:
-            # Try to find video on first track
-            currentIncarnation['tags']['framerate']=currentIncarnation['meta']['streams'][0]['avg_frame_rate']
-            currentIncarnation['tags']['framerate']=currentIncarnation['tags']['framerate'].split('/')
-            currentIncarnation['tags']['framerate']=int(currentIncarnation['tags']['framerate'][0])/int(currentIncarnation['tags']['framerate'][1])
-        except ZeroDivisionError:
-            # Try to find video on second track
-            currentIncarnation['tags']['framerate']=currentIncarnation['meta']['streams'][1]['avg_frame_rate']
-            currentIncarnation['tags']['framerate']=currentIncarnation['tags']['framerate'].split('/')
-            currentIncarnation['tags']['framerate']=int(currentIncarnation['tags']['framerate'][0])/int(currentIncarnation['tags']['framerate'][1])
+        for i in range(5):
+            try:
+                # Try to find video on i-nth track
+                currentIncarnation['tags']['framerate']=currentIncarnation['meta']['streams'][i]['avg_frame_rate']
+                currentIncarnation['tags']['framerate']=currentIncarnation['tags']['framerate'].split('/')
+                currentIncarnation['tags']['framerate']=int(currentIncarnation['tags']['framerate'][0])/int(currentIncarnation['tags']['framerate'][1])
 
+                # If we reached this point, everything was good and we found a valid framerate.
+                # No need to continue.
+                break
+            except ZeroDivisionError:
+                # Simply continue to next track if video not found on this track
+                pass
 
         # Update the tags dict with video tags extracted from file
         for varname,tagname in metaToTags:
@@ -995,6 +1052,7 @@ class PhotoCuration(object):
 
             self.logger.debug(f"ffprobe {currentIncarnation['decryptedFileInfo']['decryptedFilePath']}")
             currentIncarnation['meta']=ffmpeg.probe(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
+            currentIncarnation['xmp']=self.tagger.getXMP(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
 
             metaToTags=[
                 # exifread bindings
@@ -1015,16 +1073,19 @@ class PhotoCuration(object):
                     pass
 
             # Get video number of frames per second; useful to handle slow motion videos
-            try:
-                # Try to find video on first track
-                currentIncarnation['tags']['framerate']=currentIncarnation['meta']['streams'][0]['avg_frame_rate']
-                currentIncarnation['tags']['framerate']=currentIncarnation['tags']['framerate'].split('/')
-                currentIncarnation['tags']['framerate']=int(currentIncarnation['tags']['framerate'][0])/int(currentIncarnation['tags']['framerate'][1])
-            except ZeroDivisionError:
-                # Try to find video on second track
-                currentIncarnation['tags']['framerate']=currentIncarnation['meta']['streams'][1]['avg_frame_rate']
-                currentIncarnation['tags']['framerate']=currentIncarnation['tags']['framerate'].split('/')
-                currentIncarnation['tags']['framerate']=int(currentIncarnation['tags']['framerate'][0])/int(currentIncarnation['tags']['framerate'][1])
+            for i in range(5):
+                try:
+                    # Try to find video on i-nth track
+                    currentIncarnation['tags']['framerate']=currentIncarnation['meta']['streams'][i]['avg_frame_rate']
+                    currentIncarnation['tags']['framerate']=currentIncarnation['tags']['framerate'].split('/')
+                    currentIncarnation['tags']['framerate']=int(currentIncarnation['tags']['framerate'][0])/int(currentIncarnation['tags']['framerate'][1])
+
+                    # If we reached this point, everything was good and we found a valid framerate.
+                    # No need to continue.
+                    break
+                except ZeroDivisionError:
+                    # Simply continue to next track if video not found on this track
+                    pass
 
             # Get video duration
             currentIncarnation['tags']['video_duration']=float(currentIncarnation['meta']['format']['duration'])
@@ -1120,7 +1181,7 @@ class PhotoCuration(object):
 
 
 
-            #mark BEGIN Write tags and metadata to a file
+            #mark BEGIN Write tags and metadata to a text file
             currentIncarnation['tmp']['metadata']=tempfile.NamedTemporaryFile(suffix='.ffmetadata',dir=self.target, delete=False)
             currentIncarnation['tmp']['metadata'].close()
             currentIncarnation['tmp']['metadata']=currentIncarnation['tmp']['metadata'].name
@@ -1176,7 +1237,7 @@ class PhotoCuration(object):
 
                             print("{}={}".format(fileTagName,value),file=metadata)
 
-            #mark END Write tags and metadata to a file
+            #mark END Write tags and metadata to a text file
 
 
             #mark BEGIN Iterate until there is no filename collision
@@ -1334,9 +1395,11 @@ class PhotoCuration(object):
 #                 self.tagVideo(currentIncarnation)
                 #mark END old fashion tagging
 
+                self.tagger.tag(currentIncarnation)
+
         #mark END iterate over all incarnations
 
-        #mark BEGIN cleanup
+        #mark BEGIN general cleanup
 
         for incarnation in asset['incarnations']:
             currentIncarnation=asset['incarnations'][incarnation]
@@ -1354,7 +1417,7 @@ class PhotoCuration(object):
 
 
 
-        #mark END cleanup
+        #mark END general cleanup
 
 
 
@@ -1576,9 +1639,9 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                     file=asset['incarnations']['original']['tags']['original_file']
                 )
 
-            if 'png' in asset['incarnations']['master']['tags']['original_file_extension']:
-                # Edited PNGs become JPGs
-                asset['incarnations']['master']['tags']['original_file_extension']='jpg'
+#             if asset['incarnations']['master']['tags']['original_file_extension'] in ['png','heic']:
+#                 # Edited PNGs and edited HEICs become JPGs
+#                 asset['incarnations']['master']['tags']['original_file_extension']='jpg'
 
             asset['incarnations']['master']['backupfile']=self.mutation.format(
                 dcim_folder=asset['incarnations']['master']['tags']['dcim_folder'],
@@ -1604,10 +1667,26 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
 
             # Extract image from iOS backup and put it into target folder with a temporary name
-            currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
-                relativePath=currentIncarnation['backupfile'],
-                targetFolder=self.target
-            )
+            try:
+                # FIXME: bad place for this decision
+                currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
+                    relativePath=currentIncarnation['backupfile'],
+                    targetFolder=self.target
+                )
+            except FileNotFoundError:
+                # Error probably because edited [HEIC|PNG|DNG|CR2] became JPG
+                currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
+                    relativePath=(
+                        currentIncarnation['backupfile']
+                        .replace('.png','.jpg')
+                        .replace('.heic','.jpg')
+                        .replace('.jpeg','.jpg')
+                        .replace('.dng','.jpg')
+                        .replace('.cr2','.jpg')
+                    ),
+                    targetFolder=self.target
+                )
+
 
             currentIncarnation['tags']['ext'] = os.path.splitext(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])[1][1:].strip().lower()
 
@@ -1654,12 +1733,14 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                     # Exif tag unavailable in image, so ignore it.
                     pass
 
+            # Get file XMP
+            currentIncarnation['xmp']=self.tagger.getXMP(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
 
 
 
 
             # Write EXIF, XMP, IPTC tags
-            self.tagImage(currentIncarnation)
+#             self.tagImage(currentIncarnation)
 
 
 
@@ -1700,10 +1781,12 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
             #mark END find and avoid file name clashes
 
+
+            # Now tag file with XMP
+            self.tagger.tag(currentIncarnation)
+
+
         #mark END itarate over incarnations
-
-
-
 
 
 
@@ -2510,6 +2593,274 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
     def sync(self):
         pass
+
+
+
+class Tagger:
+    xmpNamespaces={
+        'xmp':             libxmp.consts.XMP_NS_XMP,
+        'dc':              libxmp.consts.XMP_NS_DC,
+        'exif':            libxmp.consts.XMP_NS_EXIF,
+        'exifEX':          "http://cipa.jp/exif/1.0/",
+        'aux':             libxmp.consts.XMP_NS_EXIF_Aux,
+        'mwg-rs':          'http://www.metadataworkinggroup.com/schemas/regions/',
+        'stDim':           libxmp.consts.XMP_NS_XMP_Dimensions,
+        'stArea':          'http://ns.adobe.com/xmp/sType/Area#',
+        'stDim':           'http://ns.adobe.com/xap/1.0/sType/Dimensions#',
+        'photoshop':       libxmp.consts.XMP_NS_Photoshop,
+        'apple-fi':        "http://ns.apple.com/faceinfo/1.0/",
+        'Iptc4xmpExt':     'http://iptc.org/std/Iptc4xmpExt/2008-02-29/',
+        'Iptc4xmpCore':    'http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/',
+        'xmpMM':           libxmp.consts.XMP_NS_XMP_MM,
+        'xmpDM':           libxmp.consts.XMP_NS_DM,
+        'xmpRights':       libxmp.consts.XMP_NS_XMP_Rights,
+        'MicrosoftPhoto':  'http://ns.microsoft.com/photo/1.0/',
+        'PhotoCuration':   'http://avi.alkalay.net/PhotoCuration/xmlns/1.0'
+    }
+
+    tagMap=[
+        ('dc', 'creator', 'author', 'list'),
+        ('dc', 'description', 'suggested_caption'),
+        ('dc', 'source', 'uuid'),
+        ('dc', 'subject', 'keywords'),
+        ('dc', 'title', 'suggested_caption'),
+        ('xmp', 'CreatorTool', 'app_creator'),
+        ('xmp', 'Nickname', '{filename}'),
+        ('xmp', 'Rating', '{favorited_percent}'),
+        ('xmpRights', 'Owner', 'device_owner', 'list'),
+
+        ('xmpMM', 'DocumentID', 'uuid'),
+
+        ('xmpDM', 'shotLocation', 'location_suggested_name'),
+        ('photoshop', 'Country', 'location_country'),
+        ('photoshop', 'State', 'location_state'),
+        ('photoshop', 'City', 'location_city'),
+
+
+        ('dc', 'identifier', 'uuid'),
+
+        ('xmpDM', 'album', '{albums_list}'),
+        ('xmpDM', 'artist', 'author'),
+
+        ('xmpDM', 'scene', 'location_context'),
+        ('Iptc4xmpExt', 'PersonInImage', 'people_list'),
+
+
+        ('Iptc4xmpExt', 'City', 'location_city'),
+        ('Iptc4xmpExt', 'CountryCode', 'location_countryCode'),
+        ('Iptc4xmpExt', 'CountryName', 'location_country'),
+        ('Iptc4xmpExt', 'ProvinceState', 'location_state'),
+        ('Iptc4xmpExt', 'Sublocation', 'location_subLocality'),
+        ('Iptc4xmpExt', 'WorldRegion', 'location_context'),
+
+        ('MicrosoftPhoto', 'CameraSerialNumber', 'device_serial_number'),
+        ('MicrosoftPhoto', 'LensManufacturer', 'camera_lens_make', 'nooverwrite'),
+        ('MicrosoftPhoto', 'LensModel', 'camera_lens_model', 'nooverwrite'),
+        ('MicrosoftPhoto', 'Rating', '{favorited_5stars}'),
+        ('MicrosoftPhoto', 'LastKeywordXMP', 'keywords'),
+    ]
+
+
+    facesTamplate=jinja2.Template('''
+        <?xpacket begin="<feff>" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+        <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+
+         <rdf:Description rdf:about=""
+          xmlns:apple-fi="http://ns.apple.com/faceinfo/1.0/"
+          xmlns:PhotoCuration="http://avi.alkalay.net/PhotoCuration/xmlns/1.0"
+          xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+          xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
+          xmlns:stDim="http://ns.adobe.com/xap/1.0/sType/Dimensions#">
+          <mwg-rs:Regions rdf:parseType="Resource">
+           <mwg-rs:AppliedToDimensions rdf:parseType="Resource">
+            <stDim:unit>pixel</stDim:unit>
+            <stDim:w>4032</stDim:w>
+            <stDim:h>3024</stDim:h>
+           </mwg-rs:AppliedToDimensions>
+           <mwg-rs:RegionList>
+            <rdf:Bag>
+            {% for f in people -%}
+             <rdf:li rdf:parseType="Resource">
+                  <mwg-rs:Type>{{f.Type}}</mwg-rs:Type>
+                  <mwg-rs:Name>{{f.Name}}</mwg-rs:Type>
+                  <mwg-rs:Area rdf:parseType="Resource">
+                       <stArea:unit>normalized</stArea:unit>
+                       <stArea:x>{{f.Area.x}}</stArea:x>
+                       <stArea:y>{{f.Area.y}}</stArea:y>
+                       <stArea:w>{{f.Area.w}}</stArea:w>
+                       <stArea:h>{{f.Area.h}}</stArea:h>
+                  </mwg-rs:Area>
+                  <mwg-rs:Extensions rdf:parseType="Resource">
+                       <PhotoCuration:ShortName>{{f.ShortName}}</PhotoCuration:ShortName>
+                       <PhotoCuration:FaceUUID>{{f.person_uuid}}</PhotoCuration:FaceUUID>
+                       <PhotoCuration:FaceURI>{{f.person_uri}}</PhotoCuration:FaceURI>
+                       <apple-fi:FaceID>{{f.person_id}}</apple-fi:FaceID>
+
+                       <PhotoCuration:FaceSize>{{f.Area.facesize_normal}}</PhotoCuration:FaceSize>
+
+                       <PhotoCuration:CenterPixX>{{f.Area.center_xpix}}</PhotoCuration:CenterPixX>
+                       <PhotoCuration:CenterPixY>{{f.Area.center_ypix}}</PhotoCuration:CenterPixY>
+
+                       <PhotoCuration:RightEyePixX>{{f.Area.righteye_xpix}}</PhotoCuration:RightEyePixX>
+                       <PhotoCuration:RightEyePixY>{{f.Area.righteye_ypix}}</PhotoCuration:RightEyePixY>
+
+                       <PhotoCuration:LeftEyePixX>{{f.Area.lefteye_xpix}}</PhotoCuration:LeftEyePixX>
+                       <PhotoCuration:LeftEyePixY>{{f.Area.lefteye_ypix}}</PhotoCuration:LeftEyePixY>
+
+                       <PhotoCuration:MouthPixX>{{f.Area.mouth_xpix}}</PhotoCuration:MouthPixX>
+                       <PhotoCuration:MouthPixY>{{f.Area.mouth_ypix}}</PhotoCuration:MouthPixY>
+                  </mwg-rs:Extensions>
+             </rdf:li>
+            {% endfor -%}
+             <rdf:li rdf:parseType="Resource">
+              <mwg-rs:Type>Focus</mwg-rs:Type>
+              <mwg-rs:Area rdf:parseType="Resource">
+               <stArea:unit>normalized</stArea:unit>
+               <stArea:h>0.46500000000000002</stArea:h>
+               <stArea:w>0.42799999999999999</stArea:w>
+               <stArea:x>0.50900000000000001</stArea:x>
+               <stArea:y>0.41749999999999998</stArea:y>
+              </mwg-rs:Area>
+             </rdf:li>
+            </rdf:Bag>
+           </mwg-rs:RegionList>
+          </mwg-rs:Regions>
+         </rdf:Description>
+        </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end='w'?>
+    ''')
+
+
+
+
+    def __init__(self):
+        self.logger=logging.getLogger('{a}.{b}'.format(a=__name__, b=type(self).__name__))
+
+        for n in self.xmpNamespaces:
+            libxmp.XMPMeta.register_namespace(suggested_prefix=n, namespace_uri=self.xmpNamespaces[n])
+
+
+    def getXMP(self,file):
+        return libxmp.XMPFiles(file_path=file, open_forupdate=False).get_xmp()
+
+
+    def addFaces(self, incarnation):
+        """
+        Instrument asset's XMP (masterDoc) adding regions with face names to it.
+        """
+
+        if incarnation['people']:
+            masterDoc = bs4.BeautifulSoup(incarnation['xmp'].serialize_to_str(), "xml")
+
+            regionsDoc = bs4.BeautifulSoup(self.facesTamplate.render({'people': incarnation['people']}), "xml")
+
+            if masterDoc:
+                # Register all namespaces
+                root=masterDoc.find('rdf:Description')
+                for n in self.xmpNamespaces:
+                    root['xmlns:' + n] = self.xmpNamespaces[n]
+
+
+
+                # Check if there are any 'Regions'?
+                r=masterDoc.find('mwg-rs:Regions')
+
+                if r:
+                    # Find original 'Focus' region and save it
+                    focus=r.find('rdf:li').find('mwg-rs:Type').find(text='Focus')
+                    if focus:
+                        focus=focus.parent().parent() # get to the `rdf:li` element
+
+                        # Detach the Focus struct information
+                        focus.extract()
+                        # Transplant it to the new Regions struct
+                        regionsDoc.find('mwg-rs:Regions').find('mwg-rs:RegionList').find('rdf:Bag').append(focus)
+
+                    # Delete former `Regions`
+                    r.decompose()
+
+                # Append the named regions into the `<rdf:Description>` tag
+                masterDoc.find('rdf:Description').append(regionsDoc.find('mwg-rs:Regions'))
+            else:
+                # No initial XMP to instrument, so make the whole generated Regions XMP the definitive
+                masterDoc=regionsDoc
+
+            self.logger.debug(masterDoc.prettify())
+
+            incarnation['xmp']=libxmp.core.XMPMeta(xmp_str=str(masterDoc))
+
+
+
+
+    def tag(self,incarnation):
+        for m in self.tagMap:
+            modifier=None
+            (nsPrefix,xmpTagName,photoCurationTagName) = (m[0],m[1],m[2])
+            if len(m)==4:
+                modifier=m[3]
+
+            self.logger.warning(photoCurationTagName)
+
+            value=None
+            if '{' in photoCurationTagName:
+                # Use format()
+                value=photoCurationTagName.format(**incarnation['tags'])
+            elif photoCurationTagName in incarnation['tags']:
+                value=incarnation['tags'][photoCurationTagName]
+
+            try:
+                if modifier and 'nooverwrite' in modifier and incarnation['xmp'].does_property_exist(self.xmpNamespaces[nsPrefix], xmpTagName):
+                    # Do not touch this existing XMP tag
+                    pass
+                else:
+                    if value:
+                        if modifier and 'list' in modifier:
+                            value=[value]
+
+                        if isinstance(value, list):
+                            for i in range(len(value)):
+                                incarnation['xmp'].append_array_item(
+                                        self.xmpNamespaces[nsPrefix],
+                                        xmpTagName,
+                                        value[i],
+                                        {
+                                            'prop_array_is_ordered': False,
+                                            'prop_value_is_array': True
+                                        }
+                                )
+                        else:
+                            incarnation['xmp'].set_property(
+                                self.xmpNamespaces[nsPrefix],
+                                xmpTagName,
+                                value
+                            )
+            except Exception as e:
+                logging.error("«{}:{}»: «{}» ({})".format(nsPrefix,xmpTagName,value,type(value)))
+                raise e
+
+
+        self.addFaces(incarnation)
+
+        xmpfile=libxmp.XMPFiles(file_path=str(incarnation['tags']['filename']), open_forupdate=True)
+        if xmpfile.can_put_xmp(incarnation['xmp']):
+            # Embed XMP in supported formats
+            xmpfile.put_xmp(incarnation['xmp'])
+            xmpfile.close_file()
+        else:
+            # Write tags to sidecar XMP file when handling unsupported formats (HEIC?)
+            xmpfile.close_file()
+            xmpfile=libxmp.XMPFiles(file_path=str(incarnation['tags']['filename'])+".xmp", open_forupdate=True)
+            xmpfile.put_xmp(incarnation['xmp'])
+            xmpfile.close_file()
+
+#         if incarnation['people']:
+#             t='Xmp.dwc.Record/dcterms:bibliographicCitation'
+#             tag=pyexiv2.XmpTag(t,json.dumps(incarnation['people'],indent=4,ensure_ascii=False))
+#             incarnation['meta'][t]=tag
+
+
 
 
 
