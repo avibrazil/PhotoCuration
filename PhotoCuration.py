@@ -1,8 +1,8 @@
 __version__ = '0.5'
 
 
-# import sys
-# sys.path.insert(0,"../..") # Adds higher directory to python modules path.
+import sys
+sys.path.insert(0,"../..") # Adds higher directory to python modules path.
 
 #### TODO
 # - Write photo XMP tags
@@ -789,14 +789,21 @@ class PhotoCuration(object):
             assetCurrent['incarnations']['master']['tags']['original_file_extension']=os.path.splitext(assetCurrent['incarnations']['master']['tags']['original_file'])[1][1:].strip().lower()
 
 
-            self.logger.warning("Working on {} [{}] “{}”".format(
+            self.logger.info("Working on {} [{}] “{}”".format(
                 assetCurrent['incarnations']['master']['tags']['original_file'],
                 assetCurrent['incarnations']['master']['tags']['creation_local_object'].isoformat(),
                 assetCurrent['incarnations']['master']['tags']['suggested_caption']
             ))
 
 
+            try:
+                del self.assetCurrent
+            except AttributeError:
+                pass
+
             self.assetCurrent=assetCurrent
+
+            self.logger.debug('MultiHandling')
 
             if assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>0') or assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>10'): # and 'gif' not in assetCurrent['incarnations']['master']['tags']['original_file_extension']:
                 # Regular image as JPG, HEIC, PNG, GIF, DNG
@@ -808,6 +815,7 @@ class PhotoCuration(object):
 
             if assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('1>'):
                 # Various types of video
+                self.logger.debug('Handling video')
                 self.handleVideo(assetCurrent)
 
             if assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>2'):
@@ -912,6 +920,8 @@ class PhotoCuration(object):
         )
 
         # Extract image from iOS backup and put it into target folder with a temporary name
+        self.logger.debug(f"Going to extract {currentIncarnation['backupfile']}")
+
         currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
             relativePath=currentIncarnation['backupfile'],
             targetFolder=self.target
@@ -919,11 +929,11 @@ class PhotoCuration(object):
 
         self.logger.debug(f"ffprobe {currentIncarnation['decryptedFileInfo']['decryptedFilePath']}")
         currentIncarnation['meta']=ffmpeg.probe(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
-        currentIncarnation['xmp']=self.tagger.getXMP(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
+        currentIncarnation['tags'].update(self.tagger.getTags(currentIncarnation['decryptedFileInfo']['decryptedFilePath']))
 
 
         metaToTags=[
-            # exifread bindings
+            # ffprobe bindings
             ('media_create_time', 'creation_time'),
             ('camera_make', 'com.apple.quicktime.make'), # Apple
             ('camera_model', 'com.apple.quicktime.model'), # iPhone 11 Pro
@@ -1052,7 +1062,7 @@ class PhotoCuration(object):
 
             self.logger.debug(f"ffprobe {currentIncarnation['decryptedFileInfo']['decryptedFilePath']}")
             currentIncarnation['meta']=ffmpeg.probe(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
-            currentIncarnation['xmp']=self.tagger.getXMP(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
+            currentIncarnation['tags'].update(self.tagger.getTags(currentIncarnation['decryptedFileInfo']['decryptedFilePath']))
 
             metaToTags=[
                 # exifread bindings
@@ -1182,60 +1192,60 @@ class PhotoCuration(object):
 
 
             #mark BEGIN Write tags and metadata to a text file
-            currentIncarnation['tmp']['metadata']=tempfile.NamedTemporaryFile(suffix='.ffmetadata',dir=self.target, delete=False)
-            currentIncarnation['tmp']['metadata'].close()
-            currentIncarnation['tmp']['metadata']=currentIncarnation['tmp']['metadata'].name
-            with open(currentIncarnation['tmp']['metadata'],'w') as metadata:
-                print(';FFMETADATA1',file=metadata)
-
-                for tagname in currentIncarnation['meta']['format']['tags']:
-                    print(
-                        "{}={}".format(
-                            tagname,
-                            currentIncarnation['meta']['format']['tags'][tagname]
-                        ),
-                        file=metadata
-                    )
-
-                tagMap=[
-                    ('Xmp.dc.source', '{dcim_folder}/{original_file}'),
-                    ('Xmp.xmpMM.DocumentID', 'uuid'),
-                    ('Xmp.iptcExt.PersonInImage', 'people_list'),
-                    ('Xmp.xmp.Rating', 'favorited_percent'),
-
-                    ('Xmp.xmpDM.scene', 'location_context'),
-                    ('Xmp.iptcExt.City', 'location_city'),
-                    ('Xmp.iptcExt.CountryCode', 'location_countryCode'),
-                    ('Xmp.iptcExt.CountryName', 'location_country'),
-                    ('Xmp.iptcExt.ProvinceState', 'location_state'),
-                    ('Xmp.iptcExt.Sublocation', 'location_subLocality'),
-                    ('Xmp.iptcExt.WorldRegion', 'location_context'),
-                ]
-
-                for m in tagMap:
-                    fileTagName,photoCurationTagName=m[0],m[1]
-                    if len(m)==3:
-                        modifier=m[2]
-                    else:
-                        modifier=None
-
-                    value=None
-                    if '{' in photoCurationTagName:
-                        # Use format()
-                        value=photoCurationTagName.format(**currentIncarnation['tags'])
-                    elif photoCurationTagName in currentIncarnation['tags']:
-                        value=currentIncarnation['tags'][photoCurationTagName]
-
-                    if modifier and 'nooverwrite' in modifier and fileTagName in incarnation['meta']:
-                        # Do not touch this existing exif/xmp/iptc tag
-                        pass
-                    else:
-                        if value:
-                            self.logger.debug('{}: ({}){}'.format(fileTagName,type(value),value))
-                            if modifier and 'list' in modifier:
-                                value=[value]
-
-                            print("{}={}".format(fileTagName,value),file=metadata)
+#             currentIncarnation['tmp']['metadata']=tempfile.NamedTemporaryFile(suffix='.ffmetadata',dir=self.target, delete=False)
+#             currentIncarnation['tmp']['metadata'].close()
+#             currentIncarnation['tmp']['metadata']=currentIncarnation['tmp']['metadata'].name
+#             with open(currentIncarnation['tmp']['metadata'],'w') as metadata:
+#                 print(';FFMETADATA1',file=metadata)
+#
+#                 for tagname in currentIncarnation['meta']['format']['tags']:
+#                     print(
+#                         "{}={}".format(
+#                             tagname,
+#                             currentIncarnation['meta']['format']['tags'][tagname]
+#                         ),
+#                         file=metadata
+#                     )
+#
+#                 tagMap=[
+#                     ('Xmp.dc.source', '{dcim_folder}/{original_file}'),
+#                     ('Xmp.xmpMM.DocumentID', 'uuid'),
+#                     ('Xmp.iptcExt.PersonInImage', 'people_list'),
+#                     ('Xmp.xmp.Rating', 'favorited_percent'),
+#
+#                     ('Xmp.xmpDM.scene', 'location_context'),
+#                     ('Xmp.iptcExt.City', 'location_city'),
+#                     ('Xmp.iptcExt.CountryCode', 'location_countryCode'),
+#                     ('Xmp.iptcExt.CountryName', 'location_country'),
+#                     ('Xmp.iptcExt.ProvinceState', 'location_state'),
+#                     ('Xmp.iptcExt.Sublocation', 'location_subLocality'),
+#                     ('Xmp.iptcExt.WorldRegion', 'location_context'),
+#                 ]
+#
+#                 for m in tagMap:
+#                     fileTagName,photoCurationTagName=m[0],m[1]
+#                     if len(m)==3:
+#                         modifier=m[2]
+#                     else:
+#                         modifier=None
+#
+#                     value=None
+#                     if '{' in photoCurationTagName:
+#                         # Use format()
+#                         value=photoCurationTagName.format(**currentIncarnation['tags'])
+#                     elif photoCurationTagName in currentIncarnation['tags']:
+#                         value=currentIncarnation['tags'][photoCurationTagName]
+#
+#                     if modifier and 'nooverwrite' in modifier and fileTagName in incarnation['meta']:
+#                         # Do not touch this existing exif/xmp/iptc tag
+#                         pass
+#                     else:
+#                         if value:
+#                             self.logger.debug('{}: ({}){}'.format(fileTagName,type(value),value))
+#                             if modifier and 'list' in modifier:
+#                                 value=[value]
+#
+#                             print("{}={}".format(fileTagName,value),file=metadata)
 
             #mark END Write tags and metadata to a text file
 
@@ -1276,12 +1286,19 @@ class PhotoCuration(object):
             if 'filename' in currentIncarnation['tags']:
                 original  = ffmpeg.input(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
                 subtitles = ffmpeg.input(currentIncarnation['tmp']['subtitles'])
-                metadata  = ffmpeg.input(currentIncarnation['tmp']['metadata'])
+#                 metadata  = ffmpeg.input(currentIncarnation['tmp']['metadata'])
 
 
                 ffmpegFlags={
                     'metadata:s:s:0': 'title=Wall clock',
-                    'tag:s:s:0': 'tx3g'
+                    'tag:s:s:0': 'tx3g',
+
+
+                    # iOS videos include several track with proprietary data that is
+                    # currently unknown, unreadable and thus useless. Including them
+                    # on generated file will cause future problems with exiftool tagging.
+                    # So this parameters will ignore and eliminate them.
+                    'map': '-0:d'
 
                     # -metadata:s:v rotate="-90"
                 }
@@ -1347,9 +1364,9 @@ class PhotoCuration(object):
                         audioStretched = audioStretched.filter('atempo',X)
 
 
-
+                    # TODO don't do ALAC
                     muxer=ffmpeg.output(
-                            metadata,
+#                             metadata,
                             videoStretched,
                             audioStretched,
                             subtitles,
@@ -1365,7 +1382,7 @@ class PhotoCuration(object):
                     )
                 else:
                     muxer=ffmpeg.output(
-                            metadata,
+#                             metadata,
                             original,
                             subtitles,
                             str(currentIncarnation['tags']['filename']),
@@ -1382,8 +1399,8 @@ class PhotoCuration(object):
 
                 try:
                     self.logger.debug('"' + '" "'.join(muxer.compile()) + '"')
-                    PhotoCuration.myMuxerRun(muxer)
-#                     muxer.run()
+#                     PhotoCuration.myMuxerRun(muxer)
+                    muxer.run()
                 except Exception as e:
                     self.logger.error(currentIncarnation['subs'])
                     raise e
@@ -1395,25 +1412,25 @@ class PhotoCuration(object):
 #                 self.tagVideo(currentIncarnation)
                 #mark END old fashion tagging
 
-                self.tagger.tag(currentIncarnation)
+                self.tagger.tag(currentIncarnation, sourceMedia=currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
 
         #mark END iterate over all incarnations
 
         #mark BEGIN general cleanup
 
-        for incarnation in asset['incarnations']:
-            currentIncarnation=asset['incarnations'][incarnation]
-
-            try:
-                os.remove(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
-            except (FileNotFoundError,KeyError):
-                # File wasa not tracked or was deleted by a previous incarnation cleanup
-                pass
-
-            if 'tmp' in currentIncarnation:
-                self.logger.debug("Cleanup: " + str(currentIncarnation['tmp']))
-                for i in currentIncarnation['tmp']:
-                    os.remove(currentIncarnation['tmp'][i])
+#         for incarnation in asset['incarnations']:
+#             currentIncarnation=asset['incarnations'][incarnation]
+#
+#             try:
+#                 os.remove(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
+#             except (FileNotFoundError,KeyError):
+#                 # File was not tracked or was deleted by a previous incarnation cleanup
+#                 pass
+#
+#             if 'tmp' in currentIncarnation:
+#                 self.logger.debug("Cleanup: " + str(currentIncarnation['tmp']))
+#                 for i in currentIncarnation['tmp']:
+#                     os.remove(currentIncarnation['tmp'][i])
 
 
 
@@ -1734,16 +1751,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                     pass
 
             # Get file XMP
-            currentIncarnation['xmp']=self.tagger.getXMP(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])
-
-
-
-
-            # Write EXIF, XMP, IPTC tags
-#             self.tagImage(currentIncarnation)
-
-
-
+            currentIncarnation['tags'].update(self.tagger.getTags(currentIncarnation['decryptedFileInfo']['decryptedFilePath']))
 
 
 
@@ -2595,8 +2603,214 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         pass
 
 
+import exiftool
+
 
 class Tagger:
+
+    keymap={
+        'EXIF:Make':         'camera_make',                       # Apple
+        'EXIF:Model':        'camera_model',                      # iPhone 11 Pro
+        'EXIF:LensMake':     'camera_lens_make',                  # Apple
+        'EXIF:LensModel':    'camera_lens_model',                 # iPhone 11 Pro back dual camera 6mm f/2
+        'EXIF:Software':     'camera_software_version',           # 14.1
+    }
+
+    tagMap=[
+        # Title, keywords, rating and human curation
+        ('XMP-dc:Description',                          'suggested_caption'),
+        ('XMP-dc:Title',                                'suggested_caption'),
+        ('XMP-microsoft:LastKeywordXMP',                'keywords'),
+        ('XMP-dc:Subject',                              'keywords'),
+        ('XMP-xmpDM:Album',                             '{albums_list}'),
+        ('XMP-iptcExt:PersonInImage',                   'people_list'),
+        ('XMP-xmp:Rating',                              '{favorited_percent}'),
+        ('XMP-microsoft:Rating',                        '{favorited_5stars}'),
+
+
+        # Authorship, ownership
+        ('XMP-dc:Creator',                              'author', 'list'),
+        ('XMP-xmpRights:Owner',                         'device_owner', 'list'),
+        ('XMP-xmpDM:Artist',                            'author'),
+
+
+        # Source IDs
+        ('XMP-xmp:CreatorTool',                         'app_creator'),
+        ('XMP-xmp:Nickname',                            '{filename}'),
+        ('XMP-xmpMM:DocumentID',                        'uuid'),
+        ('XMP-dc:Identifier',                           'uuid'),
+        ('XMP-dc:Source',                               '{dcim_folder}/{original_file}'),
+        ('XMP-microsoft:CameraSerialNumber',            'device_serial_number'),
+
+
+        # Camera info
+        ('XMP-microsoft:LensManufacturer',              'camera_lens_make',     'nooverwrite'),
+        ('XMP-microsoft:LensModel',                     'camera_lens_model',    'nooverwrite'),
+
+
+        # Location semantics
+        ('XMP-xmpDM:ShotLocation',                      'location_suggested_name'),
+
+        ('XMP-iptcExt:LocationCreatedWorldRegion',      'location_context'),
+        ('XMP-xmpDM:scene',                             'location_context'),
+
+        ('XMP-iptcExt:LocationCreatedSublocation',      'location_subLocality'),
+        ('XMP-photoshop:City',                          'location_city'),
+        ('XMP-iptcExt:LocationCreatedCity',             'location_city'),
+
+        ('XMP-iptcExt:LocationCreatedProvinceState',    'location_state'),
+        ('XMP-photoshop:State',                         'location_state'),
+
+        ('XMP-photoshop:Country',                       'location_country'),
+        ('XMP-iptcExt:LocationCreatedCountryName',      'location_country'),
+        ('XMP-iptcCore:CountryCode',                    'location_countryCode'),
+
+
+    ]
+
+    faceTemplate=[
+        "{{Name={f[Name]}",
+        "Area={{Unit=normalize",
+        "H={f[Area][h]}",
+        "W={f[Area][w]}",
+        "X={f[Area][x]}",
+        "Y={f[Area][y]}}}",
+        "Type={f[Type]}}}"
+    ]
+
+
+    def __init__(self):
+        self.logger=logging.getLogger('{a}.{b}'.format(a=__name__, b=type(self).__name__))
+
+        self.et=exiftool.ExifTool()
+        self.et.start()
+
+
+
+    def __del__(self):
+        self.et.terminate()
+
+
+    def getTags(self,file):
+        tags=self.et.get_tags(self.keymap.keys(),file)
+        toReturn={}
+        for t in self.keymap:
+            if t in tags:
+                toReturn[self.keymap[t]]=tags[t]
+        return toReturn
+
+
+
+
+
+    def tag(self, incarnation, sourceMedia=None):
+        exiftoolParameters=['-overwrite_original']
+
+
+        # Decide which media file will be used as a base to copy tags.
+        # Usually videos need the original video file and images use themselves.
+        exiftoolParameters.append('-tagsfromfile')
+        if sourceMedia:
+            exiftoolParameters.append(sourceMedia)
+        else:
+            # If no initial media to copy and XMP-convert tags from, use same file that will be tagged
+            exiftoolParameters.append(str(incarnation['tags']['filename']))
+        exiftoolParameters.append("-xmp:all<all")
+
+
+        for m in self.tagMap:
+            modifier=None
+            (xmpTagName,photoCurationTagName) = (m[0],m[1])
+            if len(m)==3:
+                modifier=m[2]
+
+            value=None
+            if '{' in photoCurationTagName:
+                # Use format()
+                value=photoCurationTagName.format(**incarnation['tags'])
+            elif photoCurationTagName in incarnation['tags']:
+                value=incarnation['tags'][photoCurationTagName]
+
+            if value:
+                # nooverwrite & list: keep appending (+=)
+                # nooverwrite & regular: check for existence (-=) and add (+=)
+                # overwrite & list: reset it first (=''), then add (+=)
+                # overwrite & regular: set it
+
+                if modifier and 'nooverwrite' in modifier:
+                    # Re-set if value is scalar; keep adding if list
+                    if isinstance(value, list):
+                        for i in value:
+                            exiftoolParameters.append(f'-{xmpTagName}+={i}')
+                    else:
+                        # this exiftool flag causes tag to be set only if not already set
+                        exiftoolParameters.append(f'-{xmpTagName}-=')
+                        exiftoolParameters.append(f'-{xmpTagName}+={value}')
+                else:
+                    if isinstance(value, list):
+                        # Overwrite a list implies first cleaning it up
+                        exiftoolParameters.append(f'-{xmpTagName}-=')
+                        for i in value:
+                            # Now add each element of list
+                            exiftoolParameters.append(f'-{xmpTagName}+={i}')
+                    else:
+                        exiftoolParameters.append(f'-{xmpTagName}={value}')
+
+
+
+        # Add faces as exiftool-encoded regions
+        exiftoolParameters+=self.encodeFaces(incarnation)
+
+        # Add file name
+        exiftoolParameters.append(str(incarnation['tags']['filename']))
+
+        self.logger.debug('exiftool ' + ' '.join(exiftoolParameters))
+
+        # Convert all to binary
+        exiftoolParameters=[x.encode('utf-8') for x in exiftoolParameters]
+
+        # Send all to a running exiftool to finaly tag it
+        self.et.execute(*exiftoolParameters)
+
+
+    def encodeFaces(self,incarnation):
+        """
+        Encode faces regions into an exiftool struct
+        """
+
+        if incarnation['people']:
+            regions=[]
+
+            for f in incarnation['people']:
+                # Here we'll use \x1f instead of ',' temporarily in the text because face name might have ',' on it.
+                # Later we'll replace ',' in the name by '|,' and finaly \x1f by ','.
+                regions.append(
+                        '\x1f'.join(self.faceTemplate)
+                        .format(f=f)
+                        .replace(',','|,')
+                        .replace('\x1f',',')
+                )
+
+            parameters=[]
+
+            # First remove all faces (but keep Focus region)
+            parameters.append("-regionlist-={Type=Face}")
+
+            # Add all regions at once
+            parameters.append("-regionlist+=[" + ','.join(regions) + "]")
+
+            return parameters
+        else:
+            # No people to tag
+            return []
+
+
+
+
+
+
+
+class TaggerLibXMP:
     xmpNamespaces={
         'xmp':             libxmp.consts.XMP_NS_XMP,
         'dc':              libxmp.consts.XMP_NS_DC,
@@ -2743,7 +2957,12 @@ class Tagger:
 
 
     def getXMP(self,file):
-        return libxmp.XMPFiles(file_path=file, open_forupdate=False).get_xmp()
+        xmpfile=libxmp.XMPFiles(file_path=file, open_forupdate=False)
+        xmp=xmpfile.get_xmp()
+        xmpfile.close_file()
+
+        return xmp
+
 
 
     def addFaces(self, incarnation):
@@ -2801,7 +3020,7 @@ class Tagger:
             if len(m)==4:
                 modifier=m[3]
 
-            self.logger.warning(photoCurationTagName)
+            self.logger.debug(photoCurationTagName)
 
             value=None
             if '{' in photoCurationTagName:
