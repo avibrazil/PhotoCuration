@@ -889,10 +889,12 @@ class PhotoCuration(object):
             # face_size in pixels = face_size × √(width²+height²)
             region['Area']['facesize_pix']=f['face_size']
             region['Area']['facesize_pix']*=math.sqrt(f['width']*f['width'] + f['height']*f['height'])
-            region['Area']['x']=region['Area']['center_xpix']-region['Area']['facesize_pix']/2
-            region['Area']['y']=region['Area']['center_ypix']-region['Area']['facesize_pix']/2
-            region['Area']['w']=region['Area']['facesize_pix']
-            region['Area']['h']=region['Area']['facesize_pix']
+#             region['Area']['x']=region['Area']['center_xpix']-region['Area']['facesize_pix']/2
+#             region['Area']['y']=region['Area']['center_ypix']-region['Area']['facesize_pix']/2
+            region['Area']['x']=region['Area']['center_xnormal']-region['Area']['facesize_normal']/2
+            region['Area']['y']=region['Area']['center_ynormal']-region['Area']['facesize_normal']/2
+            region['Area']['w']=region['Area']['facesize_normal']
+            region['Area']['h']=region['Area']['facesize_normal']
 
             regions.append(region)
 
@@ -2688,9 +2690,9 @@ class Tagger:
         ('XMP-dc:Subject',                              'keywords'),
         ('XMP-xmpDM:Album',                             '{albums_list}'),
         ('XMP-iptcExt:PersonInImage',                   'people_list'),
-        ('XMP-xmp:Rating',                              '{favorited_5stars}'),
-        ('XMP-microsoft:Rating',                        '{favorited_5stars}'),
-        ('XMP-xmp:RatingPercent',                       '{favorited_percent}'),
+        ('XMP-xmp:Rating',                              'favorited_5stars'),
+        ('XMP-microsoft:Rating',                        'favorited_5stars'),
+        ('XMP-xmp:RatingPercent',                       'favorited_percent'),
 
         # Authorship, ownership
         ('XMP-dc:Creator',                              'author', 'list'),
@@ -2738,16 +2740,18 @@ class Tagger:
 
     ]
 
-    faceTemplate=[
-        "{{Name={f[Name]}",
-        "Area={{Unit=normalize",
-        "H={f[Area][h]}",
-        "W={f[Area][w]}",
-        "X={f[Area][x]}",
-        "Y={f[Area][y]}}}",
-        "Type={f[Type]}}}"
-    ]
-
+    faceTemplate=\
+        "{{"\
+            "Type={f[Type]},"\
+            "Name={f[Name]},"\
+            "Area={{"\
+                "Unit=normalized,"\
+                "H={f[Area][h]},"\
+                "W={f[Area][w]},"\
+                "X={f[Area][x]},"\
+                "Y={f[Area][y]}"\
+            "}}"\
+        "}}"
 
     def __init__(self):
         self.logger=logging.getLogger('{a}.{b}'.format(a=__name__, b=type(self).__name__))
@@ -2759,6 +2763,17 @@ class Tagger:
 
     def __del__(self):
         self.et.terminate()
+
+
+    def _execute(self,exiftoolParameters):
+        exiftoolParameters.insert(0,'-overwrite_original')
+
+        # Convert all to binary
+        exiftoolParameters=[x.encode('utf-8') for x in exiftoolParameters]
+
+        # Send all to a running exiftool to finaly tag it
+        self.et.execute(*exiftoolParameters)
+
 
 
     def getTags(self,file):
@@ -2774,20 +2789,34 @@ class Tagger:
 
 
     def tag(self, incarnation, sourceMedia=None):
-        exiftoolParameters=['-overwrite_original']
-
+        exiftoolParameters=[]
 
         # Decide which media file will be used as a base to copy tags.
         # Usually videos need the original video file and images use themselves.
-        exiftoolParameters.append('-tagsfromfile')
+        exiftoolParameters.append('-tagsFromFile')
         if sourceMedia:
             exiftoolParameters.append(sourceMedia)
         else:
             # If no initial media to copy and XMP-convert tags from, use same file that will be tagged
-            exiftoolParameters.append(str(incarnation['tags']['filename']))
+            exiftoolParameters.append('@')
         exiftoolParameters.append("-xmp:all<all")
+        exiftoolParameters.append("-all<all")
+
+        # Add file name
+        exiftoolParameters.append(str(incarnation['tags']['filename']))
+
+        # Document all as tags:
+        incarnation['tags']['tagger']='exiftool ' + ' '.join(exiftoolParameters)
+
+        self.logger.debug(incarnation['tags']['tagger'])
+
+        self._execute(exiftoolParameters)
 
 
+
+
+        # Now that everything was copied, add and edit tags
+        exiftoolParameters=[]
         for m in self.tagMap:
             modifier=None
             (xmpTagName,photoCurationTagName) = (m[0],m[1])
@@ -2828,24 +2857,22 @@ class Tagger:
                     else:
                         exiftoolParameters.append(f'-{xmpTagName}={value}')
 
-
-
-        # Add faces as exiftool-encoded regions
+        # Now handle faces and regions after all tags were copied and set, in the exiftool logic
         exiftoolParameters+=self.encodeFaces(incarnation)
 
-        # Add file name
-        exiftoolParameters.append(str(incarnation['tags']['filename']))
+        if len(exiftoolParameters):
+            exiftoolParameters.append(str(incarnation['tags']['filename']))
 
-        # Document all as tags:
-        incarnation['tags']['tagger']='exiftool ' + ' '.join(exiftoolParameters)
+            # Document all as tags:
+            incarnation['tags']['tagger']='exiftool ' + ' '.join(exiftoolParameters)
 
-        self.logger.debug(incarnation['tags']['tagger'])
+            self.logger.debug(incarnation['tags']['tagger'])
 
-        # Convert all to binary
-        exiftoolParameters=[x.encode('utf-8') for x in exiftoolParameters]
+            # Send all to a running exiftool to finaly tag it
+            self._execute(exiftoolParameters)
 
-        # Send all to a running exiftool to finaly tag it
-        self.et.execute(*exiftoolParameters)
+
+
 
 
     def encodeFaces(self,incarnation):
@@ -2857,14 +2884,19 @@ class Tagger:
             regions=[]
 
             for f in incarnation['people']:
-                # Here we'll use \x1f instead of ',' temporarily in the text because face name might have ',' on it.
-                # Later we'll replace ',' in the name by '|,' and finaly \x1f by ','.
+                # Here we'll first replace all ',' of template into super safe \x1f.
+                # Then we make substitutions.
+                # Then escape ',' (',' -> '|,').
+                # Then convert \x1f into ',' again.
+
                 regions.append(
-                        '\x1f'.join(self.faceTemplate)
+                    self.faceTemplate
+                        .replace(',','\x1f')
                         .format(f=f)
                         .replace(',','|,')
                         .replace('\x1f',',')
                 )
+
 
             parameters=[]
 
