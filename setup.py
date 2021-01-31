@@ -13,7 +13,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/avibrazil/PhotoCuration",
-    install_requires=['iOSbackup','biplist', 'pandas', 'jinja2', 'ffmpeg', 'mutagen', 'exifread', 'py3exiv2'],
+    install_requires=['iOSbackup','biplist', 'pandas', 'jinja2', 'ffmpeg-python', 'PyExifTool'],
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",

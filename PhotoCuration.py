@@ -873,7 +873,7 @@ class PhotoCuration(object):
         }
 
         regions=[]
-        for i,f in self.peopleOfAssets.query(f'Asset_PK=={assetPK}').iterrows():
+        for i,f in self.peopleOfAssets[self.peopleOfAssets['Asset_PK']==assetPK].iterrows():
             region={}
             region['Type']='Face'
             for k in faceKeyMap:
@@ -985,7 +985,14 @@ class PhotoCuration(object):
             )
         )
 
-        currentIncarnation['tags']['video_codec']=currentIncarnation['tags']['video_codec'].replace('.','')
+        if 'video_codec' in currentIncarnation['tags']:
+            currentIncarnation['tags']['video_codec']=currentIncarnation['tags']['video_codec'].replace('.','')
+        else:
+            # Some Instagram videos doesn't set exiftool’s 'QuickTime:CompressorName'.
+            # But we need it to be used as file extension for some conversion operations of slow motion videos.
+            # We are going to set it as 'h264' as default even if not used in Instagram situations.
+            currentIncarnation['tags']['video_codec']='h264'
+
 
         # Get video duration
 #         currentIncarnation['tags']['video_duration']=float(currentIncarnation['meta']['format']['duration'])
@@ -1002,8 +1009,8 @@ class PhotoCuration(object):
             # Timelapse videos recording time is the time media was created minus the time the recording was started
             currentIncarnation['tags']['variation']='timelapse'
             currentIncarnation['tags']['recording_duration']=(
-                currentIncarnation['tags']['media_create_time'].astimezone(None)-
-                currentIncarnation['tags']['creation_utc_object'].to_pydatetime()
+                pd.Timestamp(currentIncarnation['tags']['media_create_time'],tz='UTC')-
+                currentIncarnation['tags']['creation_utc_object']
             ).total_seconds()
         else:
             # Regular videos
@@ -2664,22 +2671,23 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 class Tagger:
 
     keymap={
-        'EXIF:Make':         'camera_make',                       # Apple
-        'EXIF:Model':        'camera_model',                      # iPhone 11 Pro
-        'EXIF:LensMake':     'camera_lens_make',                  # Apple
-        'EXIF:LensModel':    'camera_lens_model',                 # iPhone 11 Pro back dual camera 6mm f/2
-        'EXIF:Software':     'camera_software_version',           # 14.1
+        'EXIF:Make':                 'camera_make',                       # Apple
+        'EXIF:Model':                'camera_model',                      # iPhone 11 Pro
+        'EXIF:LensMake':             'camera_lens_make',                  # Apple
+        'EXIF:LensModel':            'camera_lens_model',                 # iPhone 11 Pro back dual camera 6mm f/2
+        'EXIF:Software':             'camera_software_version',           # 14.1
         'QuickTime:MediaCreateDate': 'media_create_time',         # 2020:11:17 21:18:04 (UTC)
-        'QuickTime:VideoFrameRate': 'framerate',                  # 30
-        'QuickTime:Duration':     'video_duration',               # "27.5 s" or "0:03:02"
-        'Composite:Rotation':  'video_rotation',                  # 90
-        'QuickTime:CompressorName': 'video_codec',                # HEVC, H.264
-        'Keys:Make':         'camera_make',
-        'Keys:Model':        'camera_model',
-        'Keys:Software':     'camera_software_version',
-        'QuickTime:Make':         'camera_make',
-        'QuickTime:Model':        'camera_model',
-        'QuickTime:Software':     'camera_software_version'
+        'QuickTime:VideoFrameRate':  'framerate',                  # 30
+        'QuickTime:Duration':        'video_duration',               # "27.5 s" or "0:03:02"
+        'IFD0:Orientation':          'orientation',
+        'Composite:Rotation':        'video_rotation',                  # 90
+        'QuickTime:CompressorName':  'video_codec',                # HEVC, H.264
+        'Keys:Make':                 'camera_make',
+        'Keys:Model':                'camera_model',
+        'Keys:Software':             'camera_software_version',
+        'QuickTime:Make':            'camera_make',
+        'QuickTime:Model':           'camera_model',
+        'QuickTime:Software':        'camera_software_version'
     }
 
     tagMap=[
@@ -2738,6 +2746,11 @@ class Tagger:
         ('XMP-photoshop:Country',                       'location_country'),
 
 
+        # Other
+        ('orientation',                                 'orientation'),
+
+        # ffmpeg video rotation (-metadata:s:v rotate="-90") doesn't seem to work
+        ('rotation',                                    'video_rotation')
     ]
 
     faceTemplate=\
@@ -2800,7 +2813,9 @@ class Tagger:
             # If no initial media to copy and XMP-convert tags from, use same file that will be tagged
             exiftoolParameters.append('@')
         exiftoolParameters.append("-xmp:all<all")
-        exiftoolParameters.append("-all<all")
+
+        # Had to deactivate "-all<all" because it wrongly changes orientation of some selfies
+        # exiftoolParameters.append("-all<all")
 
         # Add file name
         exiftoolParameters.append(str(incarnation['tags']['filename']))
@@ -3212,6 +3227,10 @@ class WallclockSubtitles:
     #     * subtitle text precision: 0.1s (time is 01:02:03.4)
     #     * number of subtitles: recordingDuration×freqUpdate÷precision
 
+    subtitleSRTitemTemplate='{index}\n'\
+        '{start} --> {end}\n'\
+        '{text}\n'
+
     def __init__(
                 self,
                 startTime,
@@ -3309,11 +3328,11 @@ class WallclockSubtitles:
         # currentIncarnation['decryptedFileInfo']['decryptedFilePath']+'.srt'
         with open(fileName,'w') as subs:
             for i,s in self.subtitles.iterrows():
-                print("{}\n{} --> {}\n{}\n".format(
-                        i+1,
-                        s['start'].strftime(self.timecodeFormat)[:12],
-                        s['end'].strftime(self.timecodeFormat)[:12],
-                        s['text'].strftime(self.wallclockFormat)+self.circa*' (circa)'
+                print(self.subtitleSRTitemTemplate.format(
+                        index=i+1,
+                        start=s['start'].strftime(self.timecodeFormat)[:12],
+                        end=s['end'].strftime(self.timecodeFormat)[:12],
+                        text=s['text'].strftime(self.wallclockFormat)+self.circa*' (circa)'
                     ),
                     file=subs
                 )
