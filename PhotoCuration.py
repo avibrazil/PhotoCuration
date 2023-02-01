@@ -1,11 +1,10 @@
 __version__ = '0.5'
 
 
-import sys
-sys.path.insert(0,"../..") # Adds higher directory to python modules path.
+# import sys
+# sys.path.insert(0,"../..") # Adds higher directory to python modules path.
 
 #### TODO
-# - Write photo XMP tags
 # - Handle no model tag and fill with other attributes
 
 
@@ -17,7 +16,7 @@ import configparser
 import sys
 import os
 import io
-import biplist
+# import biplist
 import pandas as pd
 import numpy as np
 import logging
@@ -28,9 +27,10 @@ import copy
 import pathlib
 from pathlib import Path
 import jinja2
-import ffmpeg
+# import ffmpeg # pip install ffmpeg-python
 import dateutil
 import datetime
+import pytz
 import math
 import tempfile
 # import exifread
@@ -38,7 +38,7 @@ import tempfile
 import re
 import json
 import subprocess
-import exiftool
+import NSKeyedUnArchiver
 
 
 
@@ -64,7 +64,27 @@ module_logger = logging.getLogger(__name__)
 
 
 
-filenaneTemplate="""{#- -#}
+# filenaneTemplate="""{#- -#}
+# {% if albums_list != None and albums_list|count > 0 %}{{ creation_local_object.strftime('%Y-%m') }} {{ albums_list[0]|secure }}/{% endif -%}
+# {{ creation_local_time_fs }} {% if kind_encoded.startswith('1>') -%}
+# ▶️{% elif favorited -%}
+# ★{% else -%}
+# •{% endif -%}
+# {% if suggested_caption is not none %} {{ suggested_caption|secure }}{% endif -%}
+# {% if author or camera_model or app_creator %} 【{#- -#}
+# {% if author %}{{ author|secure -}}{% endif -%}
+# {% if author and (camera_model or app_creator) %}·︎{% endif -%}
+# {% if camera_model or app_creator %}{{ (camera_model or app_creator)|secure }}{% endif -%}
+# {% if unedited %} original{% endif %}{% if variation %} {{variation}}{% endif %}】{% endif -%}
+# {% if collision_index>0 %}~〔{{ "{:02d}".format(collision_index) }}〕{% endif -%}
+# .{{ ext -}}
+# """
+
+
+
+# Filesystem folders from smallest photo album
+templateWithFolder="""{#- -#}
+{% if album_title != None %}{{ album_period|secure }} {{ album_title|secure }}/{% endif -%}
 {{ creation_local_time_fs }} {% if kind_encoded.startswith('1>') -%}
 ▶️{% elif favorited -%}
 ★{% else -%}
@@ -78,6 +98,24 @@ filenaneTemplate="""{#- -#}
 {% if collision_index>0 %}~〔{{ "{:02d}".format(collision_index) }}〕{% endif -%}
 .{{ ext -}}
 """
+
+# No folder for photo album
+templateNoFolder="""{#- -#}
+{{ creation_local_time_fs }} {% if kind_encoded.startswith('1>') -%}
+▶️{% elif favorited -%}
+★{% else -%}
+•{% endif -%}
+{% if suggested_caption is not none %} {{ suggested_caption|secure }}{% endif -%}
+{% if author or camera_model or app_creator %} 【{#- -#}
+{% if author %}{{ author|secure -}}{% endif -%}
+{% if author and (camera_model or app_creator) %}·︎{% endif -%}
+{% if camera_model or app_creator %}{{ (camera_model or app_creator)|secure }}{% endif -%}
+{% if unedited %} original{% endif %}{% if variation %} {{variation}}{% endif %}】{% endif -%}
+{% if collision_index>0 %}~〔{{ "{:02d}".format(collision_index) }}〕{% endif -%}
+.{{ ext -}}
+"""
+
+
 
 class PhotoCuration(object):
 
@@ -265,11 +303,26 @@ class PhotoCuration(object):
                 ZGENERICALBUM.ZPROJECTRENDERUUID,
                 ZGENERICALBUM.ZCUSTOMQUERYTYPE
             from ZGENERICALBUM
+            where
+                ZTRASHEDSTATE = 0 AND
+                ZTITLE not NULL AND
+                ZKIND not between 3500 and 3600
     """
+#     Albums:
+#         ZKIND:
+#             1505: iCloud
+#             2: Regular
+#             1506: ???? (ZTITLE always NULL)
+#             16??: ???? (ZTITLE always NULL)
+#             35??: iOS internal operations (ZTITLE in (progress-sync, progress-ota-restore, progress-fs-import))
+#             3900 and up: ????
+    
+    
 
     assetTypes={ # match with `kind_encoded` from `listOfAssets` query
         '0>0':     'image', # JPG, HEIC, PNG, GIF
         '0>0>2':   'animated GIF',
+        '0>1':     'panorama',
         '0>10':    'screenshot',
         '0>0>1>2': 'part of burst',
         '0>2>3>0': 'live photo',
@@ -308,6 +361,7 @@ class PhotoCuration(object):
                             when ZASSET.ZVISIBILITYSTATE=2 then 'part of burst'
                             else 'image' -- check ZCREATORBUNDLEID if its a PNG
                         end
+                        when ZASSET.ZKINDSUBTYPE=1 then 'panorama'
                         when ZASSET.ZKINDSUBTYPE=10 then 'screenshot' -- created by this device
                         when ZASSET.ZKINDSUBTYPE=2 then case -- live photos
                             when ZASSET.ZPLAYBACKSTYLE=3 then case
@@ -342,10 +396,15 @@ class PhotoCuration(object):
                 coalesce(ZADDITIONALASSETATTRIBUTES.ZINFERREDTIMEZONEOFFSET,ZADDITIONALASSETATTRIBUTES.ZTIMEZONEOFFSET) as tz_offset,
                 datetime(ZASSET.ZDATECREATED+coalesce(ZADDITIONALASSETATTRIBUTES.ZINFERREDTIMEZONEOFFSET,ZADDITIONALASSETATTRIBUTES.ZTIMEZONEOFFSET)+strftime('%s','2001-01-01'),'unixepoch') as asset_local_time,
                 ZADDITIONALASSETATTRIBUTES.ZEXIFTIMESTAMPSTRING as exif_timestamp,
+                ZASSET.ZLATITUDE as latitude,
+                ZASSET.ZLONGITUDE  as longitude,
                 ZADDITIONALASSETATTRIBUTES.ZREVERSELOCATIONDATA as location_data,
-                ZADDITIONALASSETATTRIBUTES.ZCREATORBUNDLEID as app_creator,
+                ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBYBUNDLEIDENTIFIER as app_creator,
                 ZADDITIONALASSETATTRIBUTES.ZEDITORBUNDLEID as app_editor,
-                coalesce(ZADDITIONALASSETATTRIBUTES.ZCREATORBUNDLEID,ZADDITIONALASSETATTRIBUTES.ZEDITORBUNDLEID) as app_creator_or_editor,
+                coalesce(ZADDITIONALASSETATTRIBUTES.ZIMPORTEDBYBUNDLEIDENTIFIER,ZADDITIONALASSETATTRIBUTES.ZEDITORBUNDLEID) as app_creator_or_editor,
+                ZEXTENDEDATTRIBUTES.ZCAMERAMAKE as camera_make,
+                ZEXTENDEDATTRIBUTES.ZCAMERAMODEL as camera_model,
+                ZEXTENDEDATTRIBUTES.ZLENSMODEL as lens_model,
                 facecount.facecount,
                 named_facecount.named_facecount
             from
@@ -353,6 +412,9 @@ class PhotoCuration(object):
 
                 left outer join ZADDITIONALASSETATTRIBUTES
                     on ZADDITIONALASSETATTRIBUTES.ZASSET=ZASSET.Z_PK
+
+                left outer join ZEXTENDEDATTRIBUTES
+                    on ZEXTENDEDATTRIBUTES.ZASSET=ZASSET.Z_PK
 
                 left outer join ZASSETDESCRIPTION
                     on ZASSETDESCRIPTION.ZASSETATTRIBUTES=ZADDITIONALASSETATTRIBUTES.Z_PK
@@ -393,7 +455,7 @@ class PhotoCuration(object):
                 ZMEMORY.ZFAVORITE as memory_favorited,
                 ZMEMORY.ZFEATUREDSTATE as memory_featured,
                 ZMEMORY.ZSUBCATEGORY as memory_subcategory,
-                ZMEMORY.ZUSERCREATED as memory_usercreated,
+                -- ZMEMORY.ZUSERCREATED as memory_usercreated,
                 ZMEMORY.ZVIEWCOUNT as memory_viewcount,
                 ZMEMORY.ZKEYASSET as memory_keyasset,
                 datetime(ZMEMORY.ZCREATIONDATE+strftime('%s', '2001-01-01'), 'unixepoch') as memory_utc_creation,
@@ -443,77 +505,43 @@ class PhotoCuration(object):
     """
 
     facesForAssets="""
-            select
-                ZASSET.Z_PK as Asset_PK,
-                people.Detected_PK,
-                people.Person_PK,
-                people.short_name,
-                people.full_name,
-                people.adjustment_ver,
-                people.width,
-                people.height,
-                people.LEFTEYE_pixx,
-                people.LEFTEYE_pixy,
-                people.RIGHTEYE_pixx,
-                people.RIGHTEYE_pixy,
-                people.MOUTH_pixx,
-                people.MOUTH_pixy,
-                people.CENTER_pixx,
-                people.CENTER_pixy,
+        WITH
 
-                people.LEFTEYE_normalizedx,
-                people.LEFTEYE_normalizedy,
-                people.RIGHTEYE_normalizedx,
-                people.RIGHTEYE_normalizedy,
-                people.MOUTH_normalizedx,
-                people.MOUTH_normalizedy,
-                people.CENTER_normalizedx,
-                people.CENTER_normalizedy,
+            face AS (
+                SELECT zasset AS asset
+                    ,zperson AS person
+                    ,cast(round(zsize * sqrt(zsourcewidth * zsourcewidth + zsourceheight * zsourceheight)) AS INTEGER) AS size
+                    ,cast(round(zcenterx * zsourcewidth) AS INTEGER) AS centerx
+                    ,cast(round(zcentery * zsourceheight) AS INTEGER) AS centery
+                FROM zdetectedface
+                WHERE zasset NOT NULL
+            ),
 
-                people.face_size,
-                people.person_uri,
-                people.person_uuid
-            from
-            	ZASSET,
-                (
-                    select
-                        ZDETECTEDFACE.Z_PK as Detected_PK,
-                        ZPERSON.Z_PK as Person_PK,
-                        ZPERSON.ZDISPLAYNAME as short_name,
-                        ZPERSON.ZFULLNAME as full_name,
-                        ZDETECTEDFACE.ZADJUSTMENTVERSION as adjustment_ver,
-                        ZDETECTEDFACE.ZSOURCEWIDTH as width,
-                        ZDETECTEDFACE.ZSOURCEHEIGHT as height,
+            person AS (
+                SELECT z_pk AS id
+                    ,zdisplayname AS short_name
+                    ,zfullname AS full_name
+                    ,zpersonuri AS uri
+                    ,zpersonuuid AS uuid
+                FROM zperson
+                WHERE zdisplayname <> ''
+            )
 
-                        cast(round(ZDETECTEDFACE.ZLEFTEYEX * ZDETECTEDFACE.ZSOURCEWIDTH,0) as integer) LEFTEYE_pixx,
-                        cast(round(ZDETECTEDFACE.ZLEFTEYEY * ZDETECTEDFACE.ZSOURCEHEIGHT,0) as integer) LEFTEYE_pixy,
-                        cast(round(ZDETECTEDFACE.ZRIGHTEYEX * ZDETECTEDFACE.ZSOURCEWIDTH,0) as integer) RIGHTEYE_pixx,
-                        cast(round(ZDETECTEDFACE.ZRIGHTEYEY * ZDETECTEDFACE.ZSOURCEHEIGHT,0) as integer) RIGHTEYE_pixy,
-                        cast(round(ZDETECTEDFACE.ZMOUTHX * ZDETECTEDFACE.ZSOURCEWIDTH,0) as integer) MOUTH_pixx,
-                        cast(round(ZDETECTEDFACE.ZMOUTHY * ZDETECTEDFACE.ZSOURCEHEIGHT,0) as integer) MOUTH_pixy,
-                        cast(round(ZDETECTEDFACE.ZCENTERX * ZDETECTEDFACE.ZSOURCEWIDTH,0) as integer) CENTER_pixx,
-                        cast(round(ZDETECTEDFACE.ZCENTERY * ZDETECTEDFACE.ZSOURCEHEIGHT,0) as integer) CENTER_pixy,
-
-                        ZDETECTEDFACE.ZLEFTEYEX as LEFTEYE_normalizedx,
-                        ZDETECTEDFACE.ZLEFTEYEY as LEFTEYE_normalizedy,
-                        ZDETECTEDFACE.ZRIGHTEYEX as RIGHTEYE_normalizedx,
-                        ZDETECTEDFACE.ZRIGHTEYEY as RIGHTEYE_normalizedy,
-                        ZDETECTEDFACE.ZMOUTHX as MOUTH_normalizedx,
-                        ZDETECTEDFACE.ZMOUTHY as MOUTH_normalizedy,
-                        ZDETECTEDFACE.ZCENTERX as CENTER_normalizedx,
-                        ZDETECTEDFACE.ZCENTERY as CENTER_normalizedy,
-
-                        ZDETECTEDFACE.ZSIZE as face_size, -- face_size×√(width²+height²) = diameter of circle surrounding face
-                        ZPERSON.ZPERSONURI as person_uri,
-                        ZPERSON.ZPERSONUUID as person_uuid,
-                        ZDETECTEDFACE.ZASSET as asset
-                    from
-                        ZDETECTEDFACE, ZPERSON
-                    where
-                        ZDETECTEDFACE.ZPERSON=ZPERSON.Z_PK and
-                        ZPERSON.ZDISPLAYNAME!=''
-                ) as people
-            where people.asset=ZASSET.Z_PK;
+        SELECT
+            face.asset
+            ,face.size
+            ,face.centerx
+            ,face.centery
+            ,face.person AS person_id
+            ,person.uri AS person_uri
+            ,person.uuid AS person_uuid
+            ,person.short_name
+            ,person.full_name
+        FROM face,person
+        WHERE person.id = face.person
+        ORDER BY
+            face.asset,
+            face.size DESC
     """
 
     domain='CameraRollDomain'
@@ -551,40 +579,16 @@ class PhotoCuration(object):
         self.tagger=Tagger()
 
 
-    def curatedArchiving(self,
+    def curate(self,
                 author=None, # author of photos
                 deviceOwner=None,
-                start=None,
-                end=None,
-                extractTypes=None,
-                target=None, # folder to receive files
-                originals=['1>101', '0>2>3>0', '0>2>3>3', '0>2>5>1', '0>2>5>2'], # either to extract also originals or not
-                trashed=False,
-                filenameTemplate=filenaneTemplate
     ):
-        if start:
-            self.start=pd.Timestamp(start).to_pydatetime()
-        else:
-            self.start=start
-
-        if end:
-           self.end=pd.Timestamp(end).to_pydatetime()
-        else:
-            self.end=end
-
         self.author=author
         self.device_owner=deviceOwner
-        self.target=target
-        self.trashed=trashed
-        self.extractTypes=extractTypes
-
-        # Handling of originals
-        self.originals=originals
-
-        self.filenameTemplate=self.j2.from_string(filenameTemplate)
 
         if self.curated == False:
             self.fetchAssets()
+            self.fetchAuthor()
             self.fetchAlbums()
             self.fetchMemories()
             self.fetchPeople()
@@ -597,7 +601,7 @@ class PhotoCuration(object):
 
             self.curated=True
 
-        self.extractAndTag()
+        # self.extractAndTag()
 
 
 
@@ -647,7 +651,63 @@ class PhotoCuration(object):
             return comple
 
 
-    def extractAndTag(self):
+
+    def fetchAuthor(self):
+        camera_model_to_author_map=None
+        if isinstance(self.author, list):
+            camera_model_to_author_map=(
+                pd.DataFrame(
+                    self.author,
+                    columns=('camera_model','start','end','author')
+                )
+                .assign(
+                    start=lambda table: table.start.fillna(pd.Timestamp.min),
+                    end=lambda table: table.end.fillna(pd.Timestamp.max),
+                )
+            )
+            self.author=None
+
+        if self.author is None:
+            self.author=self.device_owner
+
+        # Set a default author for all assets
+        self.assets['author']=self.author
+
+        # Set author based on device type and time range
+        if camera_model_to_author_map is not None:
+            for i,spec in camera_model_to_author_map.iterrows():
+                self.assets.loc[(self.assets.camera_model==spec.camera_model) & (self.assets.asset_local_time.between(spec.start,spec.end)), 'author']=spec.author
+
+
+
+    def extractAndTag(self,
+                start=None,
+                end=None,
+                extractTypes=None,
+                target=None, # folder to receive files
+                originals=['1>101', '0>2>3>0', '0>2>3>3', '0>2>5>1', '0>2>5>2'], # either to extract also originals or not
+                trashed=False,
+                filenameTemplate=templateWithFolder
+    ):
+        if start:
+            self.start=pd.Timestamp(start).to_pydatetime()
+        else:
+            self.start=start
+
+        if end:
+           self.end=pd.Timestamp(end).to_pydatetime()
+        else:
+            self.end=end
+
+        self.target=target
+        self.trashed=trashed
+        self.extractTypes=extractTypes
+
+        # Handling of originals
+        self.originals=originals
+
+        self.filenameTemplate=self.j2.from_string(filenameTemplate)
+
         if self.target:
             Path(self.target).mkdir(parents=True, exist_ok=True)
 
@@ -656,7 +716,7 @@ class PhotoCuration(object):
         #        'width', 'height', 'video_duration', 'uuid', 'moment_title',
         #        'moment_subtitle', 'creation_timestamp', 'utc_time', 'tz_offset',
         #        'asset_local_time', 'exif_timestamp', 'facecount', 'named_facecount',
-        #        'location_name', 'location_context', 'location_street',
+        #        'location_name', 'location_context', 'location_street', 'album_period'
         #        'location_subLocality', 'location_city', 'location_adminArea',
         #        'location_state', 'location_country', 'location_postalCode',
         #        'location_countryCode', 'location_formattedAddress', 'album_title',
@@ -689,7 +749,6 @@ class PhotoCuration(object):
             'dcim_folder',
             'original_file',
             'edited',
-            'asset_local_time',
             'infered_asset_caption',
             'kind_encoded',
             'kind_description',
@@ -698,6 +757,8 @@ class PhotoCuration(object):
             'height',
             'video_duration',
             'uuid',
+            'latitude',
+            'longitude',
             'location_suggested_name',
             'location_name',
             'location_context',
@@ -711,8 +772,10 @@ class PhotoCuration(object):
             'location_countryCode',
             'location_formattedAddress',
             'utc_time',
+            'asset_local_time',
             'tz_offset',
             'infered_asset_caption_score',
+            'author',
             'device_owner',
             'device_hostname',
             'device_ios_version',
@@ -723,6 +786,8 @@ class PhotoCuration(object):
             'app_editor',
             'app_creator_or_editor',
             'keywords',
+            'album_title',
+            'album_period',
             'albums_list',
             'memories_list',
             'people_list'
@@ -740,7 +805,15 @@ class PhotoCuration(object):
         }
         self.tags.rename(renames, axis='columns', inplace=True)
 
-        self.tags['author']=self.author
+        # self.tags['author']=self.author
+
+        # Merge naive local time with tz_offset into a TZ-aware datetime
+        self.tags['creation_local_object']=self.tags.apply(
+            # Pandas Series only support Timestamps with same timezones.
+            # If multiple timezones, an object Series will be created, not datetime.
+            lambda w: w['creation_local_object'].tz_localize(pytz.FixedOffset(w['tz_offset']/60)),
+            axis=1
+        )
 
         PhotoCuration.itemizeDatetime(self.tags, 'creation_local_object', 'creation_local')
         PhotoCuration.itemizeDatetime(self.tags, 'creation_utc_object', 'creation_utc')
@@ -758,7 +831,6 @@ class PhotoCuration(object):
         else:
             originalHandling=[False]
 
-
         for assetCurrent in self.tags.iterrows():
             assetCurrent={
                 'pk': assetCurrent[0],
@@ -774,10 +846,14 @@ class PhotoCuration(object):
             }
 
             # Merge timezone offset into creation_local_object
-            assetCurrent['incarnations']['master']['tags']['creation_local_object']=(
-                assetCurrent['incarnations']['master']['tags']['creation_local_object']
-                .tz_localize(assetCurrent['incarnations']['master']['tags']['tz_offset'])
-            )
+#             assetCurrent['incarnations']['master']['tags']['creation_local_object']=(
+#                 assetCurrent['incarnations']['master']['tags']['creation_local_object']
+#                 .tz_localize(
+#                     pytz.FixedOffset(
+#                         assetCurrent['incarnations']['master']['tags']['tz_offset']/60
+#                     )
+#                 )
+#             )
 
             # Get people and faces of asset
             assetCurrent['incarnations']['master']['people']=self.getAssetPeople(assetCurrent['pk'])
@@ -802,9 +878,14 @@ class PhotoCuration(object):
 
             self.assetCurrent=assetCurrent
 
-            self.logger.debug('MultiHandling')
+            # self.logger.debug('MultiHandling')
 
-            if assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>0') or assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>10'): # and 'gif' not in assetCurrent['incarnations']['master']['tags']['original_file_extension']:
+            if (
+                assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>0') or
+                assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>1') or
+                assetCurrent['incarnations']['master']['tags']['kind_encoded'].startswith('0>10')
+                # and 'gif' not in assetCurrent['incarnations']['master']['tags']['original_file_extension']
+            ):
                 # Regular image as JPG, HEIC, PNG, GIF, DNG
                 self.handleImage(assetCurrent)
 
@@ -842,7 +923,8 @@ class PhotoCuration(object):
                 assetCurrent['incarnations']['master']['tags']['original_file_extension']='mov'
                 self.handleVideo(assetCurrent)
 
-
+        # if self.tagger:
+        #     del self.tagger
 
 
 
@@ -872,31 +954,19 @@ class PhotoCuration(object):
             'Area/mouth_ypix': 'MOUTH_pixy',
         }
 
-        regions=[]
-        for i,f in self.peopleOfAssets[self.peopleOfAssets['Asset_PK']==assetPK].iterrows():
-            region={}
-            region['Type']='Face'
-            for k in faceKeyMap:
-                if '/' in k:
-                    parts=k.split('/')
-                    if parts[0] not in region:
-                        region[parts[0]]={}
-                    region[parts[0]][parts[1]]=f[faceKeyMap[k]]
-                else:
-                    if f[faceKeyMap[k]] is not pd.NA:
-                        region[k]=f[faceKeyMap[k]]
-
-            # face_size in pixels = face_size × √(width²+height²)
-            region['Area']['facesize_pix']=f['face_size']
-            region['Area']['facesize_pix']*=math.sqrt(f['width']*f['width'] + f['height']*f['height'])
-#             region['Area']['x']=region['Area']['center_xpix']-region['Area']['facesize_pix']/2
-#             region['Area']['y']=region['Area']['center_ypix']-region['Area']['facesize_pix']/2
-            region['Area']['x']=region['Area']['center_xnormal']-region['Area']['facesize_normal']/2
-            region['Area']['y']=region['Area']['center_ynormal']-region['Area']['facesize_normal']/2
-            region['Area']['w']=region['Area']['facesize_normal']
-            region['Area']['h']=region['Area']['facesize_normal']
-
-            regions.append(region)
+        regions=[
+            dict(
+                Name=f['full_name'],
+                Type='Face',
+                Area=dict(
+                    x=f['centerx']-f['size']/2,
+                    y=f['centery']-f['size']/2,
+                    w=f['size'],
+                    h=f['size'],
+                )
+            )
+            for i,f in self.peopleOfAssets[self.peopleOfAssets['asset']==assetPK].iterrows()
+        ]
 
         if len(regions)>0:
             return regions
@@ -908,6 +978,9 @@ class PhotoCuration(object):
 
 
     def handleVideo(self, asset):
+        import ffmpeg # pip install ffmpeg-python
+
+
         # Get original video timecodes
 
         currentIncarnation=asset['incarnations']['master']
@@ -1044,7 +1117,7 @@ class PhotoCuration(object):
             asset['incarnations']['originalslow']['tags']['variation']='slowmotion'
             asset['incarnations']['originalslow']['tags']['newfps']=self.referenceFPS
 
-            # video duration on wannabe slow motion videos is fps/newfps time longer
+            # video duration on wannabe slow motion videos is fps/newfps times longer
             # d₁ = d₀ × framerate ÷ newfps
 
             asset['incarnations']['originalslow']['tags']['video_duration']*=(
@@ -1849,6 +1922,10 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             # Now tag file with exiftool
             self.tagger.tag(currentIncarnation, sourceMedia=asset['incarnations']['master']['decryptedFileInfo']['decryptedFilePath'])
 
+#             # Set filesystem time as create time
+#             mtime=time.mktime(info['lastModified'].astimezone(tz=None).timetuple())
+#             os.utime(targetFileName,(mtime, mtime))
+
         #mark END itarate over incarnations
 
 
@@ -2068,30 +2145,46 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
     def itemizeDatetime(df, col, prefix):
         items=[
-            ('%Y.%m.%d-%H.%M.%S', 'time_fs'),
-            ('Y', 'year'),
-            ('m', 'month'),
-            ('d', 'day'),
-            ('H', 'hour'),
-            ('M', 'minute'),
-            ('S', 'second'),
-            ('y', 'year_small'),
-            ('I', 'hour12'),
-            ('p', 'ampm'),
-            ('b', 'month_name_abrev'),
-            ('B', 'month_name'),
-            ('a', 'weekday_abrev'),
-            ('A', 'weekday'),
-            ('c', 'locale_time')
+            #   %format or element,      tag suffix
+            ('%Y.%m.%d-%H.%M.%S',      'time_fs'),
+            ('%Y-%m-%dT%H:%M:%S.%f%z', 'time_ISO8601'),
+            ('%Y:%m:%d %H:%M:%S',      'time_exiftool'),
+            ('z',                      'tz_offset'),
+            ('Y',                      'year'),
+            ('m',                      'month'),
+            ('d',                      'day'),
+            ('H',                      'hour'),
+            ('M',                      'minute'),
+            ('S',                      'second'),
+            ('f',                      'microsecond'),
+            ('y',                      'year_small'),
+            ('I',                      'hour12'),
+            ('p',                      'ampm'),
+            ('b',                      'month_name_abrev'),
+            ('B',                      'month_name'),
+            ('a',                      'weekday_abrev'),
+            ('A',                      'weekday'),
+            ('c',                      'locale_time') # Tue Aug 16 21:30:00 1988
         ]
 
         for i in items:
-            if '%' in i[0]:
-                format=i[0]
-            else:
-                format=f'%{i[0]}'
-            df[f'{prefix}_{i[1]}']=df[col].dt.strftime(format)
+            df[f'{prefix}_{i[1]}']=df[col].apply(
+                func=lambda x: x.strftime(
+                    i[0] if '%' in i[0] else f'%{i[0]}'
+                )
+            )
 
+        # Custom items
+
+        df[f'{prefix}_time_exiftool']=df.apply(
+            axis=1,
+            func=lambda x: '{}.{:.2}{}:{}'.format(
+                x[f'{prefix}_time_exiftool'],
+                x[f'{prefix}_microsecond'],
+                x[f'{prefix}_tz_offset'][:3],
+                x[f'{prefix}_tz_offset'][3:5]
+            ),
+        )
 
 
 
@@ -2140,7 +2233,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             parse_dates=dateformat,
             con=self.db
         )
-        self.memories=self.memories.convert_dtypes() # optimize data types
+#         self.memories=self.memories.convert_dtypes() # optimize data types
 
 #         datetimeCols=['album_utc_creation','album_utc_start','album_utc_end']
 
@@ -2149,31 +2242,33 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
         assets=[]
         for index, memory in self.memories.iterrows():
-#             print(memory['ZMOVIEASSETSTATE'][:15])
+            # print(memory)
 
-            if memory['ZMOVIEASSETSTATE'] != b'None':
+            if memory['ZMOVIEASSETSTATE'] != b'None' and memory['ZMOVIEASSETSTATE'] != None:
                 try:
-                    struct=biplist.readPlistFromString(memory['ZMOVIEASSETSTATE'])
-                except biplist.InvalidPlistException:
+                    struct=NSKeyedUnArchiver.unserializeNSKeyedArchiver(memory['ZMOVIEASSETSTATE'])
+                except:
                     print("{}: Invalid plist".format(memory['memory_title']))
                     continue
 
-                for i in struct['$objects'][struct['$top']['root'].integer]['NS.keys']:
+                for i in struct.keys():
                     assets.append({
                         'memory': index,
                         'memoryUUID': memory['memory_uuid'],
 #                         'memoryTrashed': memory['memory_is_trashed'],
-                        'assetUUID': struct['$objects'][i.integer]
+                        'assetUUID': i
                     })
+                # print(assets)
 
-        self.assetsOfMemories=pd.DataFrame(assets)
-        del assets
-        self.assetsOfMemories=self.assetsOfMemories.convert_dtypes()
-        self.assetsOfMemories=self.assetsOfMemories.join(
-            self.assetsOfMemories['memory'].value_counts(),
-            on='memory',
-            rsuffix='_asset_count'
-        )
+        if len(assets)>0:
+            self.assetsOfMemories=pd.DataFrame(assets)
+            del assets
+            self.assetsOfMemories=self.assetsOfMemories.convert_dtypes()
+            self.assetsOfMemories=self.assetsOfMemories.join(
+                self.assetsOfMemories['memory'].value_counts(),
+                on='memory',
+                rsuffix='_asset_count'
+            )
 
 
 
@@ -2193,6 +2288,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             con=self.db
         )
         self.albums=self.albums.convert_dtypes()[(self.albums['album_is_trashed']==0) & (self.albums['album_asset_count']>0)]
+#         self.albums=self.albums[(self.albums['album_is_trashed']==0) & (self.albums['album_asset_count']>0)]
 
 #         datetimeCols=['album_utc_creation','album_utc_start','album_utc_end']
 
@@ -2210,8 +2306,8 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             except FileNotFoundError:
                 continue
 
-            struct=biplist.readPlistFromString(data)
-            packedAssetUUIDs=struct['$objects'][struct['$top']['assetUUIDs'].integer]
+            struct=NSKeyedUnArchiver.unserializeNSKeyedArchiver(data)
+            packedAssetUUIDs=struct['assetUUIDs']
 
             assetCount=int(len(packedAssetUUIDs)/16)
             for i in range(assetCount):
@@ -2224,10 +2320,87 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
         self.assetsOfAlbums=pd.DataFrame(assets)
         self.assetsOfAlbums=self.assetsOfAlbums.convert_dtypes()
+
         del assets
 
+        # Compute album textual date range as ISO 8601:
+        #
+        # 2022-02-03 -- all assets in a single day
+        # 2022-02-03/06 -- assets between Feb 3 and 6
+        # 2022-02-27/03-06 -- assets between Feb 27 and Mar 6
+        # 2021-12-26/2022-01-10 -- assets between those 2 dates
+        #
+        # Reference: https://en.wikipedia.org/wiki/ISO_8601#Time_intervals
 
+        # Summary of next Pandas-one-liner big block:
+        #
+        # 0. Select only non-trashed assets
+        # 1. Get list of assets and start and end (videos) localtime
+        # 2. Pair them with their albums
+        # 3. Group by album to get album start and end localtime
+        # 4. Eliminate empty albums
+        # 5. Compute period string (ex: "2022-02-27/03-06")
+        # 5.1 Compute end date in an appropriate format
+        # 6. Pair album period string to its album
+        # 7. Put period string in 'album_period' column
 
+        # Now the one-liner:
+        # 7. Put period string in 'album_period' column
+        self.albums['album_period']=(
+            # 6. Pair album period string to its album
+            self.albums.join(
+                # 2. Pair them with their albums
+                self.assetsOfAlbums.join(
+                    # 0. Select only non-trashed assets
+                    # self.assets[self.assets.trashed<(2 if self.trashed else 1)]
+                    self.assets
+                    # 1. Get list of assets and start and end (videos) localtime
+                    .apply(
+                        axis=1,
+                        result_type='expand',
+                        func=lambda w: dict(
+                            assetUUID=w['uuid'],
+                            album_local_start=(
+                                w['utc_time'].tz_convert(pytz.FixedOffset(w['tz_offset']/60))
+                            ),
+                            album_local_end=(
+                                w['utc_time']+pd.Timedelta(seconds=w['video_duration'])
+                            ).tz_convert(pytz.FixedOffset(w['tz_offset']/60)),
+                        )
+                    )
+                    .set_index('assetUUID'),
+                    on='assetUUID',
+                    how='right'
+                )
+                # 3. Group by album to get album start and end localtime
+                .groupby(by='albumUUID').agg(
+                    dict(
+                        album_local_start='min',
+                        album_local_end='max'
+                    )
+                ),
+                on='album_uuid'
+            )
+            # 4. Eliminate empty albums
+            .dropna(subset=['album_local_start'])
+            # 5. Compute period string (ex: "2022-02-27/03-06")
+            .apply(
+                axis=1,
+                result_type='expand',
+                func=lambda w: '/'.join([
+                    i for i in [
+                        w['album_local_start'].strftime('%Y-%m-%d'),
+                        # 5.1 Compute end date in an appropriate format
+                        w['album_local_end'].strftime('%Y-%m-%d') if w['album_local_start'].year!=w['album_local_end'].year else (
+                            w['album_local_end'].strftime('%m-%d') if w['album_local_start'].month!=w['album_local_end'].month else (
+                                w['album_local_end'].strftime('%d') if w['album_local_start'].day!=w['album_local_end'].day else None
+                            )
+                        )
+                    ]
+                    if i
+                ])
+            )
+        )
 
 
 
@@ -2244,43 +2417,52 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         keywords: an emoji-formatted Python list including all the above.
         """
 
-        albumAggregate=[]
-        for asset,albums in self.assetsOfAlbums[self.assetsOfAlbums['albumTrashed']==0].join(self.albums, on='album')[['assetUUID','album_title']].groupby('assetUUID'):
-            albumsOfAasset={
-                'asset_pk': asset,
-                'albums_list': list(albums['album_title']),
-            }
-            albumAggregate.append(albumsOfAasset)
+        if hasattr(self,'assetsOfAlbums') and self.assetsOfAlbums is not None:
+            albumAggregate=[]
+            for asset,albums in self.assetsOfAlbums[self.assetsOfAlbums['albumTrashed']==0].join(self.albums, on='album')[['assetUUID','album_title']].groupby('assetUUID'):
+                a=albums['album_title'].dropna()
+                if a.size>0:
+                    albumsOfAasset={
+                        'asset_pk': asset,
+                        'albums_list': list(a),
+                    }
+                    albumAggregate.append(albumsOfAasset)
 
-        albumAggregate=pd.DataFrame(albumAggregate).set_index('asset_pk')
-
-
-        memoryAggregate=[]
-        for asset,memories in self.assetsOfMemories.join(self.memories[self.memories['trashed']==0], on='memory')[['assetUUID','memory_title','memory_subtitle']].groupby('assetUUID'):
-            memories['memory_title_subtitle']=memories[['memory_title', 'memory_subtitle']].agg(' @ '.join, axis=1)
-
-            memoriesOfAsset={
-                'asset': asset,
-                'memories_list': list(memories['memory_title_subtitle']),
-            }
-            memoryAggregate.append(memoriesOfAsset)
-
-        memoryAggregate=pd.DataFrame(memoryAggregate).set_index('asset')
+            self.assets=self.assets.join(
+                pd.DataFrame(albumAggregate).set_index('asset_pk'),
+                on='uuid'
+            )
 
 
-        peopleAggregate=[]
-        for asset,people in self.peopleOfAssets.groupby('Asset_PK'):
-            peopleOfAAsset={
-                'asset': asset,
-                'people_list': list(people['full_name']),
-            }
-            peopleAggregate.append(peopleOfAAsset)
+        if hasattr(self,'assetsOfMemories') and self.assetsOfMemories is not None:
+            memoryAggregate=[]
+            for asset,memories in self.assetsOfMemories.join(self.memories[self.memories['trashed']==0], on='memory')[['assetUUID','memory_title','memory_subtitle']].groupby('assetUUID'):
+                memories['memory_title_subtitle']=memories[['memory_title', 'memory_subtitle']].agg(' @ '.join, axis=1)
 
-        peopleAggregate=pd.DataFrame(peopleAggregate).set_index('asset')
+                memoriesOfAsset={
+                    'asset': asset,
+                    'memories_list': list(memories['memory_title_subtitle']),
+                }
+                memoryAggregate.append(memoriesOfAsset)
+
+            self.assets=self.assets.join(
+                pd.DataFrame(memoryAggregate).set_index('asset'),
+                on='uuid'
+            )
+        else:
+            self.assets['memories_list']=pd.NA
 
 
-        # Added to assets: list of albums, list of memories, list of people
-        self.assets=self.assets.join(albumAggregate, on='uuid').join(memoryAggregate, on='uuid').join(peopleAggregate)
+        if hasattr(self,'peopleOfAssets') and self.peopleOfAssets is not None:
+            peopleAggregate=[]
+            for asset,people in self.peopleOfAssets.groupby('asset'):
+                peopleOfAAsset={
+                    'asset': asset,
+                    'people_list': list(people['full_name']),
+                }
+                peopleAggregate.append(peopleOfAAsset)
+
+            self.assets=self.assets.join(pd.DataFrame(peopleAggregate).set_index('asset'))
 
         def reformat(thelist,element_format):
             if type(thelist) in (list,tuple):
@@ -2289,71 +2471,85 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                 return []
 
 
-        album_format='🖼{}'
-        memory_format='📅{}'
-        person_format='🙂{}'
+        formats=dict(
+            albums_list='🖼{}',
+            memories_list='📅{}',
+            people_list='🙂{}',
+        )
 
-        self.assets['keywords']=self.assets['albums_list'].where(pd.notnull(self.assets['albums_list']),None).apply(reformat,args=[album_format])
-        self.assets['keywords']+=self.assets['memories_list'].where(pd.notnull(self.assets['memories_list']),None).apply(reformat,args=[memory_format])
-        self.assets['keywords']+=self.assets['people_list'].where(pd.notnull(self.assets['people_list']),None).apply(reformat,args=[person_format])
+        # Create a column with empty lists
+        self.assets['keywords']=pd.np.empty((len(self.assets), 0)).tolist()
 
-
+        # Add keywords
+        for k in formats.keys():
+            if k in self.assets:
+                self.assets['keywords']=(
+                    self.assets[k]
+                    .where(pd.notnull(self.assets[k]),None)
+                    .apply(reformat,args=[formats[k]])
+                )
 
 
 
     def getLocationDataFromPlist(self,plistData):
+#         loc=NSKeyedUnArchiver.unserializeNSKeyedArchiver(plistData)
         try:
-            loc=biplist.readPlistFromString(plistData)
+            loc=NSKeyedUnArchiver.unserializeNSKeyedArchiver(plistData)
+#             loc=biplist.readPlistFromString(plistData)
         except:
+#             print(plistData)
             return None
+
 
         location={}
 
-        mapItem_index=loc['$objects'][loc['$top']['root'].integer]['mapItem'].integer
-        sortedPlaceInfos_index=loc['$objects'][mapItem_index]['sortedPlaceInfos'].integer
+#         mapItem_index=loc['$objects'][loc['$top']['root'].integer]['mapItem'].integer
+#         sortedPlaceInfos_index=loc['$objects'][mapItem_index]['sortedPlaceInfos'].integer
 
         # Find location_name inside the NSKeyedArchiver object
-        if loc['$objects'][loc['$top']['root'].integer]['isHome']:
+        if loc['isHome']:
             location['location_name']='Home'
-        else:
-            if len(loc['$objects'][sortedPlaceInfos_index]['NS.objects']):
-                place_index=loc['$objects'][sortedPlaceInfos_index]['NS.objects'][0].integer
-                placeName_index=loc['$objects'][place_index]['name'].integer
-                location['location_name']=loc['$objects'][placeName_index]
-
+        elif len(loc['mapItem']['sortedPlaceInfos']):
+#                 place_index=loc['$objects'][sortedPlaceInfos_index]['NS.objects'][0].integer
+#                 placeName_index=loc['$objects'][place_index]['name'].integer
+#                 location['location_name']=loc['$objects'][placeName_index]
+                location['location_name']=loc['mapItem']['sortedPlaceInfos'][0]['name']
 
         # Find location_context inside the NSKeyedArchiver object
-        place=[]
-        for l in loc['$objects'][sortedPlaceInfos_index]['NS.objects']:
-            placeName_index=loc['$objects'][l.integer]['name'].integer
-            place.append(loc['$objects'][placeName_index])
+        place=[ p['name'] for p in loc['mapItem']['sortedPlaceInfos'] ]
+#         for l in loc['$objects'][sortedPlaceInfos_index]['NS.objects']:
+#             placeName_index=loc['$objects'][l.integer]['name'].integer
+#             place.append(loc['$objects'][placeName_index])
         places=set()
         places_add=places.add
         location['location_context']=' ⊂ '.join([x for x in place if not (x in places or places_add(x))])
 
         mapper={
             # the relationship between my desired keys and the plist keys
-            'location_formattedAddress': '_formattedAddress',
-            'location_addressString': 'addressString',
-            'location_countryCode': '_ISOCountryCode',
-            'location_country': '_country',
-            'location_postalCode': '_postalCode',
-            'location_state': '_state',
-            'location_adminArea': '_subAdministrativeArea',
-            'location_subLocality': '_subLocality',
-            'location_city': '_city',
-            'location_street': '_street'
+            'location_formattedAddress':      '_formattedAddress',
+            'location_addressString':         'addressString',
+            'location_countryCode':           '_ISOCountryCode',
+            'location_country':               '_country',
+            'location_postalCode':            '_postalCode',
+            'location_state':                 '_state',
+            'location_adminArea':             '_subAdministrativeArea',
+            'location_subLocality':           '_subLocality',
+            'location_city':                  '_city',
+            'location_street':                '_street'
         }
 
         # Find various items inside the NSKeyedArchiver object
-        postalAddress_index=loc['$objects'][loc['$top']['root'].integer]['postalAddress'].integer
+#         postalAddress_index=loc['$objects'][loc['$top']['root'].integer]['postalAddress'].integer
 
         for k in mapper.keys():
-            if mapper[k] in loc['$objects'][postalAddress_index]:
-                i=loc['$objects'][postalAddress_index][mapper[k]].integer
-#                 print("{}: {}".format(type(loc['$objects'][i]),loc['$objects'][i]))
-                if loc['$objects'][i] != '$null':
-                    location[k]=loc['$objects'][i]
+            if mapper[k] in loc['postalAddress'] and loc['postalAddress'][mapper[k]] is not None:
+                location[k]=loc['postalAddress'][mapper[k]]
+
+#                 if mapper[k] in loc['postalAddress'] and loc['postalAddress'][mapper[k]] is not None:
+#                 i=loc['postalAddress'][mapper[k]].integer
+# #                 print("{}: {}".format(type(loc['$objects'][i]),loc['$objects'][i]))
+#                 if loc['$objects'][i] != '$null':
+#                     location[k]=loc['$objects'][i]
 
         return location
 
@@ -2447,7 +2643,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         )
         # We don't want to convert_dtypes() because it inserts pd.NAs which is bad
         # for Jinja2 templates. We want plain python None or empty strings stuff.
-        self.assets=self.assets.convert_dtypes()
+#         self.assets=self.assets.convert_dtypes()
 #
 #         if self.start: self.assets=self.assets[self.assets['utc_time']>=self.start]
 #         if self.end:   self.assets=self.assets[self.assets['utc_time']<=self.end]
@@ -2457,6 +2653,13 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         # Remove a '\n' from Moment title that Apple inserts to look nicer in Moment cards
         self.assets['moment_title']=self.assets['moment_title'].str.replace('\xa0',' ')
         self.assets['utc_time']=self.assets['utc_time'].dt.tz_localize('UTC')
+
+        # Do not merge with tz_offset here to not mess with curatedArchiving() start and end filters
+#         self.assets['asset_local_time']=self.assets.apply(
+#             lambda w: w['asset_local_time'].tz_localize(pytz.FixedOffset(w['tz_offset']/60)),
+#             axis=1
+#         )
+
         self.assets['caption']=self.assets['caption'].str.strip()
         self.assets['device_owner']=self.device_owner
         self.assets['device_hostname']=self.ios.manifest['Lockdown']['DeviceName'] # device name or hostname
@@ -2471,6 +2674,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         locations=[]
         for i,a in self.assets.iterrows():
             l=self.getLocationDataFromPlist(a['location_data'])
+
             if l:
                 l['asset_pk']=i
                 locations.append(l)
@@ -2507,29 +2711,35 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         bestMatch=(
             self.assetsOfAlbums
             .set_index('album')
-            .join(self.albums)[['album_uuid','album_title','album_asset_count','assetUUID']]
+            .join(self.albums)[['album_uuid','album_title','album_asset_count','assetUUID','album_period']]
             .sort_values('album_asset_count')
             .groupby('assetUUID')
             .head(1)
             .set_index('assetUUID')
         )
 
-        self.assets=self.assets.join(bestMatch[['album_title']], on='uuid')
+        self.assets=self.assets.join(bestMatch[['album_title','album_period']], on='uuid')
 
 
 
     def addAssetNameFromSmallestMemory(self):
-        bestMatch=(
-            self.assetsOfMemories
-            .set_index('memory')
-            .join(self.memories)[['memory_uuid','memory_title','memory_subtitle','memory_asset_count','assetUUID']]
-            .sort_values('memory_asset_count')
-            .groupby('assetUUID')
-            .head(1)
-            .set_index('assetUUID')
-        )
+        if hasattr(self,'assetsOfMemories') and hasattr(self,'memory'):
+            bestMatch=(
+                self.assetsOfMemories
+                .set_index('memory')
+                .join(self.memories)[['memory_uuid','memory_title','memory_subtitle','memory_asset_count','assetUUID']]
+                .sort_values('memory_asset_count')
+                .groupby('assetUUID')
+                .head(1)
+                .set_index('assetUUID')
+            )
 
-        self.assets=self.assets.join(bestMatch[['memory_title','memory_subtitle']], on='uuid')
+            self.assets=self.assets.join(bestMatch[['memory_title','memory_subtitle']], on='uuid')
+        else:
+            self.assets=self.assets.assign(
+                memory_title=None,
+                memory_subtitle=None
+            )
 
 
 
@@ -2601,6 +2811,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
     def getiOSfiles(self):
         for db in self.iOSfiles:
             self.iosDBs[db]=self.ios.getFileDecryptedCopy(self.iOSfiles[db], temporary=True)
+            logging.debug(f"{self.iOSfiles[db]}: {self.iosDBs[db]}")
 
     def processPhotos(self):
 #         nameTemplate='{datetime} {sep} {title} 【{model}】.{ext}'
@@ -2677,7 +2888,9 @@ class Tagger:
         'EXIF:LensModel':            'camera_lens_model',                 # iPhone 11 Pro back dual camera 6mm f/2
         'EXIF:Software':             'camera_software_version',           # 14.1
         'QuickTime:MediaCreateDate': 'media_create_time',         # 2020:11:17 21:18:04 (UTC)
+        'QuickTime:CreateDate':      'media_create_time',         # 2020:11:17 21:18:04 (UTC)
         'QuickTime:VideoFrameRate':  'framerate',                  # 30
+        'Track1:VideoFrameRate':     'framerate',                  # 30
         'QuickTime:Duration':        'video_duration',               # "27.5 s" or "0:03:02"
         'IFD0:Orientation':          'orientation',
         'Composite:Rotation':        'video_rotation',                  # 90
@@ -2687,26 +2900,35 @@ class Tagger:
         'Keys:Software':             'camera_software_version',
         'QuickTime:Make':            'camera_make',
         'QuickTime:Model':           'camera_model',
-        'QuickTime:Software':        'camera_software_version'
+        'QuickTime:Software':        'camera_software_version',
+        'XMP-iptcExt:ArtworkContentDescription': 'suggested_caption',
     }
 
     tagMap=[
         # Title, keywords, rating and human curation
         ('XMP-dc:Description',                          'suggested_caption'),
         ('XMP-dc:Title',                                'suggested_caption'),
+        ('XMP-iptcExt:ArtworkContentDescription',       'suggested_caption'),
         ('XMP-microsoft:LastKeywordXMP',                'keywords'),
         ('XMP-dc:Subject',                              'keywords'),
         ('XMP-xmpDM:Album',                             '{albums_list}'),
         ('XMP-iptcExt:PersonInImage',                   'people_list'),
         ('XMP-xmp:Rating',                              'favorited_5stars'),
-        ('XMP-microsoft:Rating',                        'favorited_5stars'),
+        # ('XMP-microsoft:Rating',                        'favorited_5stars'),
         ('XMP-xmp:RatingPercent',                       'favorited_percent'),
+
+        # Date and time
+        # Tags itemized from objects creation_local_object and creation_utc_object
+        # ("System:FileModifyDate",                        'creation_local_time_ISO8601'),
+        ("System:FileModifyDate",                        'creation_local_time_exiftool'),
+        ("XMP-xmp:CreateDate",                           'creation_local_time_exiftool'),
+        ("Keys:CreationDate",                            'creation_local_time_exiftool'),
+        ("QuickTime:CreateDate",                         'creation_utc_time_exiftool'),
 
         # Authorship, ownership
         ('XMP-dc:Creator',                              'author', 'list'),
         ('XMP-xmpRights:Owner',                         'device_owner', 'list'),
         ('XMP-xmpDM:Artist',                            'author'),
-
 
         # Source IDs
         ('XMP-xmp:CreatorTool',                         'app_creator'),
@@ -2718,8 +2940,8 @@ class Tagger:
 
 
         # Camera info
-        ('XMP-microsoft:LensManufacturer',              'camera_lens_make',     'nooverwrite'),
-        ('XMP-microsoft:LensModel',                     'camera_lens_model',    'nooverwrite'),
+        ('XMP-microsoft:LensManufacturer',              'camera_lens_make'),
+        ('XMP-microsoft:LensModel',                     'camera_lens_model'),
         ('XMP-getty:CameraMakeModel',                   '{camera_make}/{camera_model}/{camera_software_version}'),
         ('XMP-getty:Composition',                       'muxer'),
         ('XMP-tiff:Make'                                'camera_make',          'nooverwrite'),
@@ -2745,6 +2967,8 @@ class Tagger:
         ('XMP-iptcCore:CountryCode',                    'location_countryCode'),
         ('XMP-photoshop:Country',                       'location_country'),
 
+        ("Keys:GPSCoordinates",                         '{latitude} {longitude}'),
+
 
         # Other
         ('orientation',                                 'orientation'),
@@ -2769,28 +2993,49 @@ class Tagger:
     def __init__(self):
         self.logger=logging.getLogger('{a}.{b}'.format(a=__name__, b=type(self).__name__))
 
-        self.et=exiftool.ExifTool()
-        self.et.start()
+        self.et=None
 
 
 
     def __del__(self):
-        self.et.terminate()
+        if self.et:
+            self.et.terminate()
+
 
 
     def _execute(self,exiftoolParameters):
-        exiftoolParameters.insert(0,'-overwrite_original')
+        import exiftool.exceptions  # pip install PyExifTool
+        defaults=['-overwrite_original'] #,'-d','%Y-%m-%dT%H:%M:%S.%f%z']
+        exiftoolParameters=defaults+exiftoolParameters
 
-        # Convert all to binary
-        exiftoolParameters=[x.encode('utf-8') for x in exiftoolParameters]
+        self.logger.debug(exiftoolParameters)
 
         # Send all to a running exiftool to finaly tag it
-        self.et.execute(*exiftoolParameters)
+        try:
+            self.exiftool().execute(*exiftoolParameters)
+            self.logger.debug(f"exiftool command output: {self.exiftool().last_stdout}")
+            self.logger.debug(f"exiftool command error: {self.exiftool().last_stderr}")
+        except exiftool.exceptions.ExifToolExecuteError as e:
+            self.logger.warning(e)
+
+
+
+    def exiftool(self):
+        if self.et is None:
+            import exiftool  # pip install PyExifTool
+            self.et=exiftool.ExifToolHelper()
+
+        return self.et
 
 
 
     def getTags(self,file):
-        tags=self.et.get_tags(['a','G1'] + list(self.keymap.keys()),file)
+        tags=self.exiftool().get_tags(
+            tags=['a','G1'] + list(self.keymap.keys()),
+            files=file
+        )[0]
+        self.logger.debug(f"exiftool command output: {self.exiftool().last_stdout}")
+        self.logger.debug(f"exiftool command error: {self.exiftool().last_stderr}")
         toReturn={}
         for t in self.keymap:
             if t in tags:
@@ -2826,9 +3071,6 @@ class Tagger:
         self.logger.debug(incarnation['tags']['tagger'])
 
         self._execute(exiftoolParameters)
-
-
-
 
         # Now that everything was copied, add and edit tags
         exiftoolParameters=[]
