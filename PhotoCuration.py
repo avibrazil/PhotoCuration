@@ -5,20 +5,16 @@ __version__ = '0.5'
 # sys.path.insert(0,"../..") # Adds higher directory to python modules path.
 
 #### TODO
-# - Handle no model tag and fill with other attributes
+# - Handle no camera model tag and fill with other attributes
 
 
 
 
-from iOSbackup import iOSbackup
 import sqlite3
-import configparser
 import sys
 import os
 import io
-# import biplist
-import pandas as pd
-import numpy as np
+import textwrap
 import logging
 import pprint
 import uuid
@@ -26,18 +22,21 @@ import tempfile
 import copy
 import pathlib
 from pathlib import Path
-import jinja2
-# import ffmpeg # pip install ffmpeg-python
 import dateutil
-import datetime
 import pytz
+import datetime
 import math
-import tempfile
-# import exifread
-# import mutagen
 import re
 import json
 import subprocess
+
+from iOSbackup import iOSbackup
+import configparser
+import pandas
+import numpy as np
+import jinja2
+# import ffmpeg # pip install ffmpeg-python
+
 import NSKeyedUnArchiver
 
 
@@ -136,7 +135,7 @@ class PhotoCuration(object):
         'photos': 'Media/PhotoData/Photos.sqlite',
     }
 
-    photoData="""
+    photoData=textwrap.dedent("""\
             select
                 ZASSET.Z_PK as Asset_PK,
                 ZASSET.ZDIRECTORY,
@@ -237,9 +236,9 @@ class PhotoCuration(object):
 
             order by
                 taken, Detected_PK
-    """
+    """)
 
-    listOfAlbums="""
+    listOfAlbums=textwrap.dedent("""\
             select
                 ZGENERICALBUM.Z_PK as album_pk,
                 ZGENERICALBUM.ZUUID as album_uuid,
@@ -260,9 +259,9 @@ class PhotoCuration(object):
                 ZGENERICALBUM.ZSYNCEVENTORDERKEY,
                 ZGENERICALBUM.ZTRASHEDSTATE as album_is_trashed,
                 ZGENERICALBUM.ZCUSTOMKEYASSET,
-                ZGENERICALBUM.ZKEYASSET,
-                ZGENERICALBUM.ZSECONDARYKEYASSET,
-                ZGENERICALBUM.ZTERTIARYKEYASSET,
+            --  ZGENERICALBUM.ZKEYASSET,
+            --  ZGENERICALBUM.ZSECONDARYKEYASSET,
+            --  ZGENERICALBUM.ZTERTIARYKEYASSET,
                 ZGENERICALBUM.ZCLOUDALBUMSUBTYPE,
                 ZGENERICALBUM.ZCLOUDMULTIPLECONTRIBUTORSENABLED,
                 ZGENERICALBUM.ZCLOUDMULTIPLECONTRIBUTORSENABLEDLOCAL,
@@ -307,7 +306,7 @@ class PhotoCuration(object):
                 ZTRASHEDSTATE = 0 AND
                 ZTITLE not NULL AND
                 ZKIND not between 3500 and 3600
-    """
+    """)
 #     Albums:
 #         ZKIND:
 #             1505: iCloud
@@ -337,14 +336,19 @@ class PhotoCuration(object):
 
 
 
-    listOfAssets="""
+    listOfAssets=textwrap.dedent("""\
             select
                 ZASSET.Z_PK as Asset_PK,
                 ZASSET.ZDIRECTORY as dcim_folder,
                 ZASSET.ZFILENAME as original_file,
                 ZASSETDESCRIPTION.ZLONGDESCRIPTION as caption,
                 ZASSET.ZTRASHEDSTATE as trashed,
-                ZASSET.ZHASADJUSTMENTS as edited,
+            --  ZASSET.ZHASADJUSTMENTS as edited,
+                case
+                    when ZASSET.ZADJUSTMENTTIMESTAMP is NULL
+                    then 0
+                    else 1
+                end as edited,
                 case
                     when ZASSET.ZKIND=0 then case -- images
                         when ZASSET.ZKINDSUBTYPE=2 then '0>'||ZASSET.ZKINDSUBTYPE||'>'||ZASSET.ZPLAYBACKSTYLE||'>'||ZASSET.ZPLAYBACKVARIATION
@@ -424,31 +428,31 @@ class PhotoCuration(object):
 
                 left outer join (
                     select
-                        ZASSET as asset,
+                        ZASSETFORFACE as asset,
                         count(ZCENTERX) as facecount
                     from ZDETECTEDFACE
-                    group by ZASSET
+                    group by ZASSETFORFACE
                 ) as facecount
                     on facecount.asset=ZASSET.Z_PK
 
                 left outer join (
                     select
-                        ZASSET as asset,
+                        ZASSETFORFACE as asset,
                         count(ZCENTERX) as named_facecount
                     from ZDETECTEDFACE, ZPERSON
                     where
-                        ZDETECTEDFACE.ZPERSON=ZPERSON.Z_PK and
+                        ZDETECTEDFACE.ZPERSONFORFACE=ZPERSON.Z_PK and
                         ZPERSON.ZDISPLAYNAME!=''
-                    group by ZASSET
+                    group by ZASSETFORFACE
                 ) as named_facecount
                     on named_facecount.asset=ZASSET.Z_PK
 
             where
                 ZASSET.ZDIRECTORY like 'DCIM%'
             order by Asset_PK
-    """
+    """)
 
-    listOfMemories="""
+    listOfMemories=textwrap.dedent("""\
             select
                 ZMEMORY.Z_PK as memory_pk,
                 ZMEMORY.ZCATEGORY as memory_category,
@@ -470,9 +474,9 @@ class PhotoCuration(object):
             from ZMEMORY
             where ZMEMORY.ZREJECTED!=1
 
-    """
+    """)
 
-    assetsForMoments="""
+    assetsForMoments=textwrap.dedent("""\
             select
                 ZMOMENT.Z_PK as moment_pk,
                 ZASSET.ZMOMENT as asset_moment,
@@ -502,21 +506,21 @@ class PhotoCuration(object):
             left outer join ZADDITIONALASSETATTRIBUTES
                 on ZADDITIONALASSETATTRIBUTES.Z_PK=ZASSET.Z_PK
             where moment_title is not NULL;
-    """
+    """)
 
-    facesForAssets="""
+    facesForAssets=textwrap.dedent("""\
         WITH
-
+    
             face AS (
-                SELECT zasset AS asset
-                    ,zperson AS person
+                SELECT zassetforface AS asset
+                    ,zpersonforface AS person
                     ,cast(round(zsize * sqrt(zsourcewidth * zsourcewidth + zsourceheight * zsourceheight)) AS INTEGER) AS size
                     ,cast(round(zcenterx * zsourcewidth) AS INTEGER) AS centerx
                     ,cast(round(zcentery * zsourceheight) AS INTEGER) AS centery
                 FROM zdetectedface
-                WHERE zasset NOT NULL
+                WHERE zassetforface NOT NULL
             ),
-
+    
             person AS (
                 SELECT z_pk AS id
                     ,zdisplayname AS short_name
@@ -526,7 +530,7 @@ class PhotoCuration(object):
                 FROM zperson
                 WHERE zdisplayname <> ''
             )
-
+    
         SELECT
             face.asset
             ,face.size
@@ -542,7 +546,7 @@ class PhotoCuration(object):
         ORDER BY
             face.asset,
             face.size DESC
-    """
+    """)
 
     domain='CameraRollDomain'
 
@@ -631,7 +635,7 @@ class PhotoCuration(object):
                 '?': '⁇',
                 '/': '／',
                 '\\': '＼',
-                '\|': '￨',
+                r'|': '￨',
                 '>': '＞',
                 '<': '＜',
                 '*': '✱',
@@ -656,13 +660,13 @@ class PhotoCuration(object):
         camera_model_to_author_map=None
         if isinstance(self.author, list):
             camera_model_to_author_map=(
-                pd.DataFrame(
+                pandas.DataFrame(
                     self.author,
                     columns=('camera_model','start','end','author')
                 )
                 .assign(
-                    start=lambda table: table.start.fillna(pd.Timestamp.min),
-                    end=lambda table: table.end.fillna(pd.Timestamp.max),
+                    start=lambda table: table.start.fillna(pandas.Timestamp.min),
+                    end=lambda table: table.end.fillna(pandas.Timestamp.max),
                 )
             )
             self.author=None
@@ -690,12 +694,12 @@ class PhotoCuration(object):
                 filenameTemplate=templateWithFolder
     ):
         if start:
-            self.start=pd.Timestamp(start).to_pydatetime()
+            self.start=pandas.Timestamp(start).to_pydatetime()
         else:
             self.start=start
 
         if end:
-           self.end=pd.Timestamp(end).to_pydatetime()
+           self.end=pandas.Timestamp(end).to_pydatetime()
         else:
             self.end=end
 
@@ -821,7 +825,7 @@ class PhotoCuration(object):
         # Convert Pandas' NA into Python-native None, for increased compatibility with Jinja
         self.tags=self.tags.astype(object)
         for c in self.tags.columns:
-            self.tags[c].loc[pd.isna(self.tags[c])]=None
+            self.tags.loc[pandas.isna(self.tags[c]),c]=None
 #         self.tags.replace([np.nan], [None], inplace=True)
 
         # Database tags are ready to be used. Now get tags from file.
@@ -1006,7 +1010,7 @@ class PhotoCuration(object):
 #         currentIncarnation['tags']=(
 #             currentIncarnation['tags']
 #             .append(
-#                 pd.Series(self.tagger.getTags(
+#                 pandas.Series(self.tagger.getTags(
 #                     currentIncarnation['decryptedFileInfo']['decryptedFilePath']
 #                 ))
 #             )
@@ -1082,7 +1086,7 @@ class PhotoCuration(object):
             # Timelapse videos recording time is the time media was created minus the time the recording was started
             currentIncarnation['tags']['variation']='timelapse'
             currentIncarnation['tags']['recording_duration']=(
-                pd.Timestamp(currentIncarnation['tags']['media_create_time'],tz='UTC')-
+                pandas.Timestamp(currentIncarnation['tags']['media_create_time'],tz='UTC')-
                 currentIncarnation['tags']['creation_utc_object']
             ).total_seconds()
         else:
@@ -1638,80 +1642,80 @@ class PhotoCuration(object):
         ]
 
 
-        ffmetadata="""
-;FFMETADATA1
-major_brand=M4V
-compatible_brands=M4V mp42isom
-minor_version=0
-rating=1
-title=Bitch I'm Madonna
-artist=Madonna
-composer=Ariel Rechtshaid
-album=Bitch I'm Madonna
-genre=Pop
-track=1/1
-disc=1/1
-date=2014-12-22
-compilation=0
-gapless_playback=0
-MusicBrainz Album Release Country=FR
-LANGUAGE=eng
-SCRIPT=Latn
-MusicBrainz Album Type=single
-ARTISTS=Madonna
-MusicBrainz Album Status=official
-ISRC=USUG11401961
-CATALOGNUMBER=0060254720174
-MEDIA=Digital Media
-WORK=Bitch I'm Madonna
-PRODUCER=SOPHIE
-MusicBrainz Release Group Id=2d98fffb-ce9e-4652-ae2a-6a98bdb5306b
-MusicBrainz Work Id=2ee5508f-a3e1-44b9-bb28-aa7824dab23c
-MusicBrainz Album Id=3116df3a-ccd8-4e52-8c74-d14d1e09bdd1
-MusicBrainz Track Id=39543c56-a386-46c2-a4eb-e9ec77749d24
-MusicBrainz Release Track Id=58faf347-bcf6-4116-b407-38c9cac05eda
-MusicBrainz Artist Id=79239441-bfd5-4981-a70c-55c3f15c1287
-MusicBrainz Album Artist Id=79239441-bfd5-4981-a70c-55c3f15c1287
-iTunEXTC=||0|
-iTunMOVI=<?xml version\="1.0" encoding\="UTF-8"?>\
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\
-<plist version\="1.0">\
-<dict>\
-	<key>asset-info</key>\
-	<dict>\
-		<key>file-size</key>\
-		<integer>48343373</integer>\
-		<key>flavor</key>\
-		<string>6:640x480LC-256</string>\
-		<key>screen-format</key>\
-		<string>widescreen</string>\
-	</dict>\
-</dict>\
-</plist>\
+#         ffmetadata="""
+# ;FFMETADATA1
+# major_brand=M4V
+# compatible_brands=M4V mp42isom
+# minor_version=0
+# rating=1
+# title=Bitch I'm Madonna
+# artist=Madonna
+# composer=Ariel Rechtshaid
+# album=Bitch I'm Madonna
+# genre=Pop
+# track=1/1
+# disc=1/1
+# date=2014-12-22
+# compilation=0
+# gapless_playback=0
+# MusicBrainz Album Release Country=FR
+# LANGUAGE=eng
+# SCRIPT=Latn
+# MusicBrainz Album Type=single
+# ARTISTS=Madonna
+# MusicBrainz Album Status=official
+# ISRC=USUG11401961
+# CATALOGNUMBER=0060254720174
+# MEDIA=Digital Media
+# WORK=Bitch I'm Madonna
+# PRODUCER=SOPHIE
+# MusicBrainz Release Group Id=2d98fffb-ce9e-4652-ae2a-6a98bdb5306b
+# MusicBrainz Work Id=2ee5508f-a3e1-44b9-bb28-aa7824dab23c
+# MusicBrainz Album Id=3116df3a-ccd8-4e52-8c74-d14d1e09bdd1
+# MusicBrainz Track Id=39543c56-a386-46c2-a4eb-e9ec77749d24
+# MusicBrainz Release Track Id=58faf347-bcf6-4116-b407-38c9cac05eda
+# MusicBrainz Artist Id=79239441-bfd5-4981-a70c-55c3f15c1287
+# MusicBrainz Album Artist Id=79239441-bfd5-4981-a70c-55c3f15c1287
+# iTunEXTC=||0|
+# iTunMOVI=<?xml version\="1.0" encoding\="UTF-8"?>\
+# <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\
+# <plist version\="1.0">\
+# <dict>\
+# 	<key>asset-info</key>\
+# 	<dict>\
+# 		<key>file-size</key>\
+# 		<integer>48343373</integer>\
+# 		<key>flavor</key>\
+# 		<string>6:640x480LC-256</string>\
+# 		<key>screen-format</key>\
+# 		<string>widescreen</string>\
+# 	</dict>\
+# </dict>\
+# </plist>\
 
-sort_album_artist=Madonna
-sort_artist=Madonna
-album_artist=Madonna
-purchase_date=2015-07-23 14:40:53
-account_id=iTunes Store
-sort_name=Bitch I'm Madonna (feat. Nicki Minaj)
-copyright=© (P) 2015 Boy Toy, Inc., Exclusively licensed to Live Nation Worldwide, Inc.  Exclusively licensed to Interscope Records
-media_type=6
-encoder=Lavf58.45.100
-minor_version=0
-com.apple.quicktime.creationdate=2020-11-06T08:50:03-0300
-com.apple.quicktime.location.accuracy.horizontal=65.000000
-com.apple.quicktime.live-photo.auto=1
-com.apple.quicktime.content.identifier=F890905C-846E-41BB-8C50-8D7A873E9136
-com.apple.quicktime.live-photo.vitality-score=1.000000
-com.apple.quicktime.live-photo.vitality-scoring-version=0
-com.apple.quicktime.location.ISO6709=-23.5399-046.6565+766.849/
-com.apple.quicktime.make=Apple
-com.apple.quicktime.model=iPhone 11 Pro
-com.apple.quicktime.software=14.1
-encoder=Lavf58.45.100
-Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
-        """
+# sort_album_artist=Madonna
+# sort_artist=Madonna
+# album_artist=Madonna
+# purchase_date=2015-07-23 14:40:53
+# account_id=iTunes Store
+# sort_name=Bitch I'm Madonna (feat. Nicki Minaj)
+# copyright=© (P) 2015 Boy Toy, Inc., Exclusively licensed to Live Nation Worldwide, Inc.  Exclusively licensed to Interscope Records
+# media_type=6
+# encoder=Lavf58.45.100
+# minor_version=0
+# com.apple.quicktime.creationdate=2020-11-06T08:50:03-0300
+# com.apple.quicktime.location.accuracy.horizontal=65.000000
+# com.apple.quicktime.live-photo.auto=1
+# com.apple.quicktime.content.identifier=F890905C-846E-41BB-8C50-8D7A873E9136
+# com.apple.quicktime.live-photo.vitality-score=1.000000
+# com.apple.quicktime.live-photo.vitality-scoring-version=0
+# com.apple.quicktime.location.ISO6709=-23.5399-046.6565+766.849/
+# com.apple.quicktime.make=Apple
+# com.apple.quicktime.model=iPhone 11 Pro
+# com.apple.quicktime.software=14.1
+# encoder=Lavf58.45.100
+# Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
+#         """
 
         if incarnation['meta'].tags is None:
             incarnation['meta'].add_tags()
@@ -1867,17 +1871,28 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                 )
             except FileNotFoundError:
                 # Error probably because edited [HEIC|PNG|DNG|CR2] became JPG
-                currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
-                    targetFolder=self.target,
-                    relativePath=(
-                        currentIncarnation['backupfile']
-                        .replace('.png','.jpg')
-                        .replace('.heic','.jpg')
-                        .replace('.jpeg','.jpg')
-                        .replace('.dng','.jpg')
-                        .replace('.cr2','.jpg')
+                try:
+                    currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
+                        targetFolder=self.target,
+                        relativePath=(
+                            currentIncarnation['backupfile']
+                            .replace('.png','.jpg')
+                            .replace('.heic','.jpg')
+                            .replace('.jpeg','.jpg')
+                            .replace('.dng','.jpg')
+                            .replace('.cr2','.jpg')
+                        )
                     )
-                )
+                except FileNotFoundError:
+                    # This exception happens when an edited photo was reverted or unedited.
+                    # iOS doesn't clear the edited flag. So we have to handle this.
+                    currentIncarnation=copy.deepcopy(asset['incarnations']['master'])
+                    currentIncarnation['tags']['unedited']=True
+                    currentIncarnation['decryptedFileInfo']=self.ios.getFileDecryptedCopy(
+                        targetFolder=self.target,
+                        relativePath=currentIncarnation['backupfile']
+                    )
+
 
 
             currentIncarnation['tags']['ext'] = os.path.splitext(currentIncarnation['decryptedFileInfo']['decryptedFilePath'])[1][1:].strip().lower()
@@ -2189,7 +2204,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
 
     def fetchPeople(self):
-        self.peopleOfAssets=pd.read_sql_query(
+        self.peopleOfAssets=pandas.read_sql_query(
             self.facesForAssets,
             con=self.db
         )
@@ -2209,7 +2224,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             'asset_assettime_created': generalDateFormat
         }
 
-        self.assetsOfPlaces=pd.read_sql_query(
+        self.assetsOfPlaces=pandas.read_sql_query(
             self.assetsForMoments,
             parse_dates=dateformat,
             con=self.db
@@ -2227,7 +2242,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         }
 
 
-        self.memories=pd.read_sql_query(
+        self.memories=pandas.read_sql_query(
             self.listOfMemories,
             index_col='memory_pk',
             parse_dates=dateformat,
@@ -2238,7 +2253,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 #         datetimeCols=['album_utc_creation','album_utc_start','album_utc_end']
 
 #         for c in datetimeCols:
-#             self.albums[c]=pd.to_datetime(self.albums[c], utc=True)
+#             self.albums[c]=pandas.to_datetime(self.albums[c], utc=True)
 
         assets=[]
         for index, memory in self.memories.iterrows():
@@ -2261,7 +2276,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                 # print(assets)
 
         if len(assets)>0:
-            self.assetsOfMemories=pd.DataFrame(assets)
+            self.assetsOfMemories=pandas.DataFrame(assets)
             del assets
             self.assetsOfMemories=self.assetsOfMemories.convert_dtypes()
             self.assetsOfMemories=self.assetsOfMemories.join(
@@ -2281,7 +2296,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         }
 
 
-        self.albums=pd.read_sql_query(
+        self.albums=pandas.read_sql_query(
             self.listOfAlbums,
             index_col='album_pk',
             parse_dates=dateformat,
@@ -2293,7 +2308,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 #         datetimeCols=['album_utc_creation','album_utc_start','album_utc_end']
 
 #         for c in datetimeCols:
-#             self.albums[c]=pd.to_datetime(self.albums[c], utc=True)
+#             self.albums[c]=pandas.to_datetime(self.albums[c], utc=True)
 
         assets=[]
         for index, album in self.albums.iterrows():
@@ -2318,7 +2333,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                     'assetUUID': str(uuid.UUID(bytes=packedAssetUUIDs[i*16:(i+1)*16])).upper()
                 })
 
-        self.assetsOfAlbums=pd.DataFrame(assets)
+        self.assetsOfAlbums=pandas.DataFrame(assets)
         self.assetsOfAlbums=self.assetsOfAlbums.convert_dtypes()
 
         del assets
@@ -2364,7 +2379,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                                 w['utc_time'].tz_convert(pytz.FixedOffset(w['tz_offset']/60))
                             ),
                             album_local_end=(
-                                w['utc_time']+pd.Timedelta(seconds=w['video_duration'])
+                                w['utc_time']+pandas.Timedelta(seconds=w['video_duration'])
                             ).tz_convert(pytz.FixedOffset(w['tz_offset']/60)),
                         )
                     )
@@ -2429,7 +2444,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                     albumAggregate.append(albumsOfAasset)
 
             self.assets=self.assets.join(
-                pd.DataFrame(albumAggregate).set_index('asset_pk'),
+                pandas.DataFrame(albumAggregate).set_index('asset_pk'),
                 on='uuid'
             )
 
@@ -2446,11 +2461,11 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                 memoryAggregate.append(memoriesOfAsset)
 
             self.assets=self.assets.join(
-                pd.DataFrame(memoryAggregate).set_index('asset'),
+                pandas.DataFrame(memoryAggregate).set_index('asset'),
                 on='uuid'
             )
         else:
-            self.assets['memories_list']=pd.NA
+            self.assets['memories_list']=pandas.NA
 
 
         if hasattr(self,'peopleOfAssets') and self.peopleOfAssets is not None:
@@ -2462,7 +2477,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                 }
                 peopleAggregate.append(peopleOfAAsset)
 
-            self.assets=self.assets.join(pd.DataFrame(peopleAggregate).set_index('asset'))
+            self.assets=self.assets.join(pandas.DataFrame(peopleAggregate).set_index('asset'))
 
         def reformat(thelist,element_format):
             if type(thelist) in (list,tuple):
@@ -2478,14 +2493,14 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         )
 
         # Create a column with empty lists
-        self.assets['keywords']=pd.np.empty((len(self.assets), 0)).tolist()
+        self.assets['keywords']=np.empty((len(self.assets), 0)).tolist()
 
         # Add keywords
         for k in formats.keys():
             if k in self.assets:
                 self.assets['keywords']=(
                     self.assets[k]
-                    .where(pd.notnull(self.assets[k]),None)
+                    .where(pandas.notnull(self.assets[k]),None)
                     .apply(reformat,args=[formats[k]])
                 )
 
@@ -2577,10 +2592,10 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         for (i,a) in self.assets.iterrows():
             bestSoFar=a['moment_title']
             bestFromLocation=None
-            if a['location_name'] is not pd.NA:
+            if a['location_name'] is not pandas.NA:
                 bestFromLocation=a['location_name']
                 for locPart in locationColumns:
-                    if (a[locPart] is not pd.NA) and (a['location_name']==a[locPart]):
+                    if (a[locPart] is not pandas.NA) and (a['location_name']==a[locPart]):
                         # location_name is a street address or state or citi. Discard in favor of moment_title
                         bestFromLocation=None
                         break
@@ -2592,7 +2607,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
             bestLocations.append(best)
 
-        bestLocationName=pd.DataFrame(bestLocations).set_index('index')
+        bestLocationName=pandas.DataFrame(bestLocations).set_index('index')
         del bestLocations
 
         self.assets=self.assets.join(bestLocationName)
@@ -2614,14 +2629,14 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
         col=next(order)
         pos=0
         score=1-pos/len(priority)
-        bestCaption=pd.DataFrame()
+        bestCaption=pandas.DataFrame()
         bestCaption['infered_asset_caption']=self.assets[col].copy()
-        bestCaption['infered_asset_caption_score']=bestCaption['infered_asset_caption'].apply(lambda x: score if not pd.isnull(x) else pd.NA)
+        bestCaption['infered_asset_caption_score']=bestCaption['infered_asset_caption'].apply(lambda x: score if not pandas.isnull(x) else pandas.NA)
         for col in order:
             pos+=1
             score=1-pos/len(priority)
             bestCaption['infered_asset_caption']=bestCaption['infered_asset_caption'].fillna(self.assets[col])
-            bestCaption['infered_asset_caption_score']=bestCaption['infered_asset_caption_score'].fillna(self.assets[col].apply(lambda x: score if not pd.isnull(x) else pd.NA))
+            bestCaption['infered_asset_caption_score']=bestCaption['infered_asset_caption_score'].fillna(self.assets[col].apply(lambda x: score if not pandas.isnull(x) else pandas.NA))
 
         self.assets=self.assets.join(bestCaption)
 
@@ -2635,13 +2650,13 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             'asset_local_time': '%Y-%m-%d %H:%M:%S'
         }
 
-        self.assets=pd.read_sql_query(
+        self.assets=pandas.read_sql_query(
             self.listOfAssets,
             index_col='Asset_PK',
             parse_dates=dateformat,
             con=self.db
         )
-        # We don't want to convert_dtypes() because it inserts pd.NAs which is bad
+        # We don't want to convert_dtypes() because it inserts pandas.NAs which is bad
         # for Jinja2 templates. We want plain python None or empty strings stuff.
 #         self.assets=self.assets.convert_dtypes()
 #
@@ -2680,10 +2695,10 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
                 locations.append(l)
 
         # Save it in an additional dataframe
-        self.locations=pd.DataFrame(locations)
+        self.locations=pandas.DataFrame(locations)
         self.locations.set_index('asset_pk', inplace=True)
         if 'location_adminArea' not in self.locations:
-            self.locations['location_adminArea']=pd.NA
+            self.locations['location_adminArea']=pandas.NA
         self.locations=self.locations.convert_dtypes()
         self.locations=self.locations[[
             'location_name',
@@ -2759,8 +2774,8 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
             'location_suggested_name'
         ]
 
-        before=pd.get_option("max_rows")
-        pd.set_option("max_rows", None)
+        before=pandas.get_option("max_rows")
+        pandas.set_option("max_rows", None)
 
         # Assets with low caption score
         badNames=self.assets[(self.assets['infered_asset_caption_score']<0.5) & (self.assets['trashed']==0)][cols]
@@ -2782,7 +2797,7 @@ Some random tag by Avi Alkalay with 🙂 emoji=coisa linda
 
 
 
-        pd.set_option("max_rows", before)
+        pandas.set_option("max_rows", before)
 
 
 
@@ -3005,7 +3020,7 @@ class Tagger:
 
     def _execute(self,exiftoolParameters):
         import exiftool.exceptions  # pip install PyExifTool
-        defaults=['-overwrite_original'] #,'-d','%Y-%m-%dT%H:%M:%S.%f%z']
+        defaults='-overwrite_original -api largefilesupport=1'.split() #,'-d','%Y-%m-%dT%H:%M:%S.%f%z']
         exiftoolParameters=defaults+exiftoolParameters
 
         self.logger.debug(exiftoolParameters)
@@ -3032,7 +3047,8 @@ class Tagger:
     def getTags(self,file):
         tags=self.exiftool().get_tags(
             tags=['a','G1'] + list(self.keymap.keys()),
-            files=file
+            files=file,
+            params="-api largefilesupport=1".split(),
         )[0]
         self.logger.debug(f"exiftool command output: {self.exiftool().last_stdout}")
         self.logger.debug(f"exiftool command error: {self.exiftool().last_stderr}")
@@ -3535,7 +3551,7 @@ class WallclockSubtitles:
 
     def generate(self):
         # Generate the wall clock that will be presented as subtitles
-        self.wallclock=pd.date_range(
+        self.wallclock=pandas.date_range(
             start=self.startTime,
             end=(
                 self.startTime +
@@ -3545,7 +3561,7 @@ class WallclockSubtitles:
         )
 
         # Generate the timecodes for each subtitle
-        self.timecodes=pd.date_range(
+        self.timecodes=pandas.date_range(
             start=datetime.datetime(2000,1,1),
             end=(
                 datetime.datetime(2000,1,1)+
@@ -3555,7 +3571,7 @@ class WallclockSubtitles:
         )
 
         # Assemble together all data framework for wall clock subtitles
-        self.subtitles=pd.DataFrame({
+        self.subtitles=pandas.DataFrame({
             'start': self.timecodes[:-1], # all but last timecode
             'end':   self.timecodes[1:], # all but first timecode
             'text':  self.wallclock
