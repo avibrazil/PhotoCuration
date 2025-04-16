@@ -86,13 +86,13 @@ templateWithFolder="""{#- -#}
 {% if album_title != None %}{{ album_period|secure }} {{ album_title|secure }}/{% endif -%}
 {{ creation_local_time_fs }} {% if kind_encoded.startswith('1>') -%}
 ▶️{% elif favorited -%}
-★{% else -%}
+♥︎{% else -%}
 •{% endif -%}
 {% if suggested_caption is not none %} {{ suggested_caption|secure }}{% endif -%}
-{% if author or camera_model or app_creator %} 【{#- -#}
+{% if author or camera_nickname or camera_model or app_creator %} 【{#- -#}
 {% if author %}{{ author|secure -}}{% endif -%}
-{% if author and (camera_model or app_creator) %}·︎{% endif -%}
-{% if camera_model or app_creator %}{{ (camera_model or app_creator)|secure }}{% endif -%}
+{% if author and (camera_nickname or camera_model or app_creator) %}·︎{% endif -%}
+{% if camera_nickname or camera_model or app_creator %}{{ (camera_nickname or camera_model or app_creator)|secure }}{% endif -%}
 {% if unedited %} original{% endif %}{% if variation %} {{variation}}{% endif %}】{% endif -%}
 {% if collision_index>0 %}~〔{{ "{:02d}".format(collision_index) }}〕{% endif -%}
 .{{ ext -}}
@@ -102,13 +102,13 @@ templateWithFolder="""{#- -#}
 templateNoFolder="""{#- -#}
 {{ creation_local_time_fs }} {% if kind_encoded.startswith('1>') -%}
 ▶️{% elif favorited -%}
-★{% else -%}
+♥︎{% else -%}
 •{% endif -%}
 {% if suggested_caption is not none %} {{ suggested_caption|secure }}{% endif -%}
-{% if author or camera_model or app_creator %} 【{#- -#}
+{% if author or camera_nickname or camera_model or app_creator %} 【{#- -#}
 {% if author %}{{ author|secure -}}{% endif -%}
-{% if author and (camera_model or app_creator) %}·︎{% endif -%}
-{% if camera_model or app_creator %}{{ (camera_model or app_creator)|secure }}{% endif -%}
+{% if author and (camera_nickname or camera_model or app_creator) %}·︎{% endif -%}
+{% if camera_nickname or camera_model or app_creator %}{{ (camera_nickname or camera_model or app_creator)|secure }}{% endif -%}
 {% if unedited %} original{% endif %}{% if variation %} {{variation}}{% endif %}】{% endif -%}
 {% if collision_index>0 %}~〔{{ "{:02d}".format(collision_index) }}〕{% endif -%}
 .{{ ext -}}
@@ -315,8 +315,8 @@ class PhotoCuration(object):
 #             16??: ???? (ZTITLE always NULL)
 #             35??: iOS internal operations (ZTITLE in (progress-sync, progress-ota-restore, progress-fs-import))
 #             3900 and up: ????
-    
-    
+
+
 
     assetTypes={ # match with `kind_encoded` from `listOfAssets` query
         '0>0':     'image', # JPG, HEIC, PNG, GIF
@@ -530,7 +530,7 @@ class PhotoCuration(object):
                 FROM zperson
                 WHERE zdisplayname <> ''
             )
-    
+
         SELECT
             face.asset
             ,face.size
@@ -659,15 +659,18 @@ class PhotoCuration(object):
     def fetchAuthor(self):
         camera_model_to_author_map=None
         if isinstance(self.author, list):
-            camera_model_to_author_map=(
-                pandas.DataFrame(
-                    self.author,
-                    columns=('camera_model','start','end','author')
-                )
-                .assign(
-                    start=lambda table: table.start.fillna(pandas.Timestamp.min),
-                    end=lambda table: table.end.fillna(pandas.Timestamp.max),
-                )
+            camera_model_to_author_map=pandas.DataFrame(self.author)
+
+            columns=('camera_model','start','end','author','camera_nickname')
+            if len(camera_model_to_author_map.columns)==4:
+                # No camera nicknames provided, so add an empty column for
+                # compatibility
+                camera_model_to_author_map['camera_nickname']=None
+
+            camera_model_to_author_map.columns=columns
+            camera_model_to_author_map=camera_model_to_author_map.assign(
+                start=lambda t: t.start.fillna(pandas.Timestamp.min),
+                end=lambda t: t.end.fillna(pandas.Timestamp.max),
             )
             self.author=None
 
@@ -680,7 +683,18 @@ class PhotoCuration(object):
         # Set author based on device type and time range
         if camera_model_to_author_map is not None:
             for i,spec in camera_model_to_author_map.iterrows():
-                self.assets.loc[(self.assets.camera_model==spec.camera_model) & (self.assets.asset_local_time.between(spec.start,spec.end)), 'author']=spec.author
+                self.assets.loc[
+                    (self.assets.camera_model==spec.camera_model) &
+                    (self.assets.asset_local_time.between(spec.start,spec.end)),
+                    ['author','camera_nickname']
+                ]=[spec.author,spec.camera_nickname]
+
+            # Prefer camera_nickname if provided
+            self.assets.camera_model = (
+                self.assets
+                .camera_nickname
+                .combine_first(self.assets.camera_model)
+            )
 
 
 
@@ -749,73 +763,83 @@ class PhotoCuration(object):
 
 #         print(filters)
 
-        self.tags=self.assets.query(filters).sort_values(by='utc_time')[[
-            'dcim_folder',
-            'original_file',
-            'edited',
-            'infered_asset_caption',
-            'kind_encoded',
-            'kind_description',
-            'favorited',
-            'width',
-            'height',
-            'video_duration',
-            'uuid',
-            'latitude',
-            'longitude',
-            'location_suggested_name',
-            'location_name',
-            'location_context',
-            'location_street',
-            'location_subLocality',
-            'location_city',
-            'location_adminArea',
-            'location_state',
-            'location_country',
-            'location_postalCode',
-            'location_countryCode',
-            'location_formattedAddress',
-            'utc_time',
-            'asset_local_time',
-            'tz_offset',
-            'infered_asset_caption_score',
-            'author',
-            'device_owner',
-            'device_hostname',
-            'device_ios_version',
-            'device_ios_build',
-            'device_serial_number',
-            'device_product_type',
-            'app_creator',
-            'app_editor',
-            'app_creator_or_editor',
-            'keywords',
-            'album_title',
-            'album_period',
-            'albums_list',
-            'memories_list',
-            'people_list'
-        ]].copy()
-
-
-        self.tags['favorited_percent']=100*self.tags['favorited']
-        self.tags['favorited_5stars']=5*self.tags['favorited']
-
         renames={
-            'infered_asset_caption': 'suggested_caption',
+            'infered_asset_caption':       'suggested_caption',
             'infered_asset_caption_score': 'suggested_caption_score',
-            'asset_local_time': 'creation_local_object',
-            'utc_time': 'creation_utc_object'
+            'asset_local_time':            'creation_local_object',
+            'utc_time':                    'creation_utc_object'
         }
-        self.tags.rename(renames, axis='columns', inplace=True)
 
-        # self.tags['author']=self.author
+        self.tags=(
+            self.assets
+            .query(filters)
+            .sort_values(by='utc_time')[[
+                'dcim_folder',
+                'original_file',
+                'edited',
+                'infered_asset_caption',
+                'kind_encoded',
+                'kind_description',
+                'favorited',
+                'width',
+                'height',
+                'video_duration',
+                'uuid',
+                'latitude',
+                'longitude',
+                'location_suggested_name',
+                'location_name',
+                'location_context',
+                'location_street',
+                'location_subLocality',
+                'location_city',
+                'location_adminArea',
+                'location_state',
+                'location_country',
+                'location_postalCode',
+                'location_countryCode',
+                'location_formattedAddress',
+                'utc_time',
+                'asset_local_time',
+                'tz_offset',
+                'infered_asset_caption_score',
+                'author',
+                'device_owner',
+                'device_hostname',
+                'device_ios_version',
+                'device_ios_build',
+                'device_serial_number',
+                'device_product_type',
+                'app_creator',
+                'app_editor',
+                'app_creator_or_editor',
+                'keywords',
+                'album_title',
+                'album_period',
+                'albums_list',
+                'memories_list',
+                'people_list',
+                'camera_nickname'
+            ]]
+            .copy()
+            .pipe(
+                lambda t: t.rename(renames, axis='columns')
+            )
+            .assign(
+                favorited_percent  = lambda t: 100 * t.favorited,
+                favorited_5stars   = lambda t:   5 * t.favorited,
+            )
+        )
+
+        if self.tags.shape[0]<1:
+            return
 
         # Merge naive local time with tz_offset into a TZ-aware datetime
+        # Pandas Series only support Timestamps with same timezones. If
+        # multiple timezones, a Series with objects will be created, not
+        # with datetime. So localize each timestamp using tz_offset column.
         self.tags['creation_local_object']=self.tags.apply(
-            # Pandas Series only support Timestamps with same timezones.
-            # If multiple timezones, an object Series will be created, not datetime.
-            lambda w: w['creation_local_object'].tz_localize(pytz.FixedOffset(w['tz_offset']/60)),
+            lambda row: row.creation_local_object.tz_localize(pytz.FixedOffset(row.tz_offset/60)),
             axis=1
         )
 
@@ -2675,7 +2699,7 @@ class PhotoCuration(object):
 #             axis=1
 #         )
 
-        self.assets['caption']=self.assets['caption'].str.strip()
+        self.assets['caption']=self.assets['caption'].str.strip().replace('', pandas.NA)
         self.assets['device_owner']=self.device_owner
         self.assets['device_hostname']=self.ios.manifest['Lockdown']['DeviceName'] # device name or hostname
         self.assets['device_ios_version']=self.ios.manifest['Lockdown']['ProductVersion'] # iOS version as 14.0.1, see Version column of https://en.wikipedia.org/wiki/IOS_version_history#Version_history
@@ -2922,6 +2946,7 @@ class Tagger:
     tagMap=[
         # Title, keywords, rating and human curation
         ('XMP-dc:Description',                          'suggested_caption'),
+        ('Description',                                 'suggested_caption'),
         ('XMP-dc:Title',                                'suggested_caption'),
         ('XMP-iptcExt:ArtworkContentDescription',       'suggested_caption'),
         ('XMP-microsoft:LastKeywordXMP',                'keywords'),
